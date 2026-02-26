@@ -1,4 +1,9 @@
 Raw_data_gaussian_input_output_V1/
 ECDFormer_dataset/
 ed_multipole_moments_5w/
+DetaNet/
+EnviroDetaNet/
+data/
 .vscode/
+.DS_Store
+项目架构.txt
