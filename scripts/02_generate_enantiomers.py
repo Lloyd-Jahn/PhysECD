@@ -221,6 +221,9 @@ def generate_expanded_csv(train_data, val_data, test_data, output_path, waveleng
     """
     all_data = train_data + val_data + test_data
 
+    # Sort by absolute ID value, then by ID (positive before negative)
+    all_data = sorted(all_data, key=lambda x: (abs(x.mol_id), -x.mol_id))
+
     rows = []
     missing_wavelengths = 0
     for data in tqdm(all_data, desc="  Creating CSV rows"):

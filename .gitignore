@@ -4,6 +4,7 @@ ed_multipole_moments_5w/
 DetaNet/
 EnviroDetaNet/
 data/
+prompts_and_work_progress/
 .vscode/
 .DS_Store
 项目架构.txt
