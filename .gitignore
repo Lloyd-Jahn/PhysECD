@@ -3,7 +3,7 @@ ECDFormer_dataset/
 ed_multipole_moments_5w/
 DetaNet/
 EnviroDetaNet/
-data/
+/Users/jiangyi/Desktop/ECD光谱预测大模型课题文件/PhysECD (3.12) m_loss无法下降/data/
 prompts_and_work_progress/
 .vscode/
 .DS_Store
