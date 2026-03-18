@@ -13,8 +13,8 @@ Physics Formula (from 06_generate_spectrum.py):
 """
 运行指令：
 cd到PhysECD目录下，执行以下命令：
-/home/jiangyi/.conda/envs/ecd_pred/bin/python /home/data/jiangyi/PhysECD/scripts/07_generate_real_spectrum.py --mol_idx 5
-最后的数字“5”可以自己指定
+/home/jiangyi/.conda/envs/ecd_pred/bin/python /home/data/jiangyi/PhysECD-main/scripts/07_generate_real_spectrum.py --mol_id 6283
+最后的数字”6283”是分子ID，可以自己指定
 """
 
 import numpy as np
@@ -26,9 +26,10 @@ from pathlib import Path
 def parse_args():
     parser = argparse.ArgumentParser(description='Generate real ECD spectrum from CMCDS dataset')
     parser.add_argument('--input_csv', type=str,
-                        default='/home/data/jiangyi/PhysECD/data/CMCDS_DATASET_with_enantiomers.csv',
+                        default='/home/data/jiangyi/PhysECD-main/data/CMCDS_DATASET_with_enantiomers.csv',
                         help='Input CSV file')
-    parser.add_argument('--mol_idx', type=int, default=0, help='Molecule index')
+    parser.add_argument('--mol_id', type=int, required=True,
+                        help='Molecule ID (e.g. 6283 or -6283)')
     parser.add_argument('--output_dir', type=str, default='ecd_real_results', help='Output directory')
     parser.add_argument('--sigma', type=float, default=0.4, help='Gaussian broadening σ (eV)')
     parser.add_argument('--wavelength_min', type=float, default=80.0, help='Min wavelength (nm)')
@@ -58,17 +59,16 @@ def main():
     # Read CSV
     df = pd.read_csv(args.input_csv)
 
-    # Get unique molecule IDs (each molecule has 3 rows)
-    unique_ids = df['ID'].unique()
-    num_molecules = len(unique_ids)
-
-    if args.mol_idx >= num_molecules:
-        raise ValueError(f"mol_idx {args.mol_idx} out of range (dataset has {num_molecules} molecules)")
-
-    mol_id = unique_ids[args.mol_idx]
-
-    # Get the 3 rows for this molecule
+    # Find molecule by mol_id
+    mol_id = args.mol_id
     mol_data = df[df['ID'] == mol_id]
+    if mol_data.empty:
+        # mol_id might be stored as different type, try matching
+        available_ids = df['ID'].unique()
+        raise ValueError(
+            f"Molecule ID {mol_id} not found in CSV. "
+            f"Available IDs (first 10): {available_ids[:10].tolist()}"
+        )
 
     # Extract excitation energies
     E_row = mol_data[mol_data['ECD Transition Parameters'] == 'Excitation energies (eV)']

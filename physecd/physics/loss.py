@@ -21,17 +21,19 @@ class PhysECDLoss(nn.Module):
 
     Args:
         lambda_E: Weight for excitation energy loss (default: 1.0)
-        lambda_mu: Weight for electric dipole loss (default: 10.0)
-        lambda_m: Weight for magnetic dipole loss (default: 20.0)
+        lambda_mu: Weight for electric dipole loss (default: 1.0)
+        lambda_m: Weight for magnetic dipole loss (default: 1.0)
         lambda_R: Weight for rotatory strength loss (default: 1.0)
+        ema_decay: EMA decay factor for loss normalization (default: 0.99)
     """
 
     def __init__(
         self,
         lambda_E=1.0,
-        lambda_mu=10.0,   # 提升偶极矩权重，加速底层电荷流动的学习
-        lambda_m=20.0,    # 大幅提升磁偶极矩权重，打破不下降的僵局
-        lambda_R=1.0      # 单位缩放对齐后，1.0 即可产生健康的梯度
+        lambda_mu=1.0,
+        lambda_m=1.0,
+        lambda_R=1.0,
+        ema_decay=0.99
     ):
         super().__init__()
 
@@ -40,11 +42,13 @@ class PhysECDLoss(nn.Module):
         self.lambda_m = lambda_m
         self.lambda_R = lambda_R
 
-        # ---------------- 物理常数与缩放因子 ----------------
-        # 旋转强度的单位说明：
-        # 模型在 aggregation.py 中已经使用公式 R = 6414.135151 × (μ · m) / E
-        # 输出的 R_pred 单位已经是 10^-40 cgs，与数据集标签 y_R 单位一致
-        # 因此不需要额外的单位转换
+        # 损失归一化：用指数移动平均跟踪每个分量的量级
+        self.ema_decay = ema_decay
+        self.register_buffer('ema_E', torch.tensor(0.0))
+        self.register_buffer('ema_mu', torch.tensor(0.0))
+        self.register_buffer('ema_m', torch.tensor(0.0))
+        self.register_buffer('ema_R', torch.tensor(0.0))
+        self.register_buffer('initialized', torch.tensor(False))
 
     def forward(self, pred, target):
         """
@@ -93,12 +97,34 @@ class PhysECDLoss(nn.Module):
         loss_R = F.mse_loss(pred['R_pred'], y_R)
         # ====================================================================
 
+        # 损失归一化：用 EMA 跟踪每个分量的量级，归一化后再加权
+        with torch.no_grad():
+            if not self.initialized:
+                self.ema_E.copy_(loss_E.detach())
+                self.ema_mu.copy_(loss_mu.detach())
+                self.ema_m.copy_(loss_m.detach())
+                self.ema_R.copy_(loss_R.detach())
+                self.initialized.fill_(True)
+            else:
+                d = self.ema_decay
+                self.ema_E.mul_(d).add_(loss_E.detach(), alpha=1 - d)
+                self.ema_mu.mul_(d).add_(loss_mu.detach(), alpha=1 - d)
+                self.ema_m.mul_(d).add_(loss_m.detach(), alpha=1 - d)
+                self.ema_R.mul_(d).add_(loss_R.detach(), alpha=1 - d)
+
+        # 用 EMA 值做归一化（加 eps 防除零）
+        eps = 1e-8
+        norm_E = loss_E / (self.ema_E + eps)
+        norm_mu = loss_mu / (self.ema_mu + eps)
+        norm_m = loss_m / (self.ema_m + eps)
+        norm_R = loss_R / (self.ema_R + eps)
+
         # Weighted total loss
         total_loss = (
-            self.lambda_E * loss_E +
-            self.lambda_mu * loss_mu +
-            self.lambda_m * loss_m +
-            self.lambda_R * loss_R
+            self.lambda_E * norm_E +
+            self.lambda_mu * norm_mu +
+            self.lambda_m * norm_m +
+            self.lambda_R * norm_R
         )
 
         loss_dict = {
@@ -110,9 +136,3 @@ class PhysECDLoss(nn.Module):
         }
 
         return total_loss, loss_dict
-
-    def update_weights(self, lambda_E=None, lambda_mu=None, lambda_m=None, lambda_R=None):
-        if lambda_E is not None: self.lambda_E = lambda_E
-        if lambda_mu is not None: self.lambda_mu = lambda_mu
-        if lambda_m is not None: self.lambda_m = lambda_m
-        if lambda_R is not None: self.lambda_R = lambda_R

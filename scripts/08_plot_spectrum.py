@@ -13,7 +13,7 @@ Features:
 """
 运行指令：
 cd到PhysECD目录下，执行以下命令：
-/home/jiangyi/.conda/envs/ecd_pred/bin/python /home/data/jiangyi/PhysECD/scripts/08_plot_spectrum.py --csv_path csv文件路径
+/home/jiangyi/.conda/envs/ecd_pred/bin/python /home/data/jiangyi/PhysECD-main/scripts/08_plot_spectrum.py --csv_path csv文件路径
 """
 
 import argparse
