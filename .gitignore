@@ -3,3 +3,8 @@ documents/
 .claude/
 .DS_Store
 CLAUDE.md
+checkpoints/
+overfit_test/
+*.pyc
+*.log
+
