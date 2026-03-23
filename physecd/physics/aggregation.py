@@ -60,7 +60,8 @@ class PhysicsAggregation(nn.Module):
 
         # Step 3: Magnetic dipole aggregation
         # Formula: m_total = Σ_A [m_A + (1/2) * r_A × v_A]
-        pos_expanded = pos_delta.unsqueeze(1).expand(-1, 20, -1)   # [N_total, 20, 3]
+        n_states = v_A.shape[1]
+        pos_expanded = pos_delta.unsqueeze(1).expand(-1, n_states, -1)   # [N_total, n_states, 3]
         orbital_m = 0.5 * torch.cross(pos_expanded, v_A, dim=-1)  # [N_total, 20, 3]
         m_contrib = m_A + orbital_m  # [N_total, 20, 3]
         m_total = scatter_sum(m_contrib, batch, dim=0)  # [Batch_size, 20, 3]

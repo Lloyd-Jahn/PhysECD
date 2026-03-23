@@ -24,6 +24,7 @@ class PhysECDLoss(nn.Module):
         lambda_mu: Weight for electric dipole loss (default: 1.0)
         lambda_m: Weight for magnetic dipole loss (default: 1.0)
         lambda_R: Weight for rotatory strength loss (default: 1.0)
+        lambda_R_sign: Weight for R sign classification loss (default: 1.0)
         ema_decay: EMA decay factor for loss normalization (default: 0.99)
     """
 
@@ -33,6 +34,7 @@ class PhysECDLoss(nn.Module):
         lambda_mu=1.0,
         lambda_m=1.0,
         lambda_R=1.0,
+        lambda_R_sign=1.0,
         ema_decay=0.99
     ):
         super().__init__()
@@ -41,6 +43,7 @@ class PhysECDLoss(nn.Module):
         self.lambda_mu = lambda_mu
         self.lambda_m = lambda_m
         self.lambda_R = lambda_R
+        self.lambda_R_sign = lambda_R_sign
 
         # 损失归一化：用指数移动平均跟踪每个分量的量级
         self.ema_decay = ema_decay
@@ -79,22 +82,43 @@ class PhysECDLoss(nn.Module):
         y_E = target['y_E'].reshape(batch_size, n_states)
         loss_E = F.mse_loss(pred['E_pred'], y_E)
 
-        # 2. 电跃迁偶极 (Velocity Dipole) Loss
+        # 2. 电跃迁偶极 (Velocity Dipole) Loss - Phase-Invariant
         y_mu = target['y_mu_vel'].reshape(batch_size, n_states, 3)
-        loss_mu = F.mse_loss(pred['mu_total'], y_mu)
+        mu_diff = pred['mu_total'] - y_mu
+        mu_sum = pred['mu_total'] + y_mu
+        loss_mu_phase1 = (mu_diff ** 2).sum(dim=-1)  # [B, n_states]
+        loss_mu_phase2 = (mu_sum ** 2).sum(dim=-1)   # [B, n_states]
+        loss_mu = torch.min(loss_mu_phase1, loss_mu_phase2).mean()
 
-        # 3. 磁跃迁偶极 Loss
+        # 3. 磁跃迁偶极 Loss - Phase-Invariant
         y_m = target['y_m'].reshape(batch_size, n_states, 3)
-        loss_m = F.mse_loss(pred['m_total'], y_m)
+        m_diff = pred['m_total'] - y_m
+        m_sum = pred['m_total'] + y_m
+        loss_m_phase1 = (m_diff ** 2).sum(dim=-1)  # [B, n_states]
+        loss_m_phase2 = (m_sum ** 2).sum(dim=-1)   # [B, n_states]
+        loss_m = torch.min(loss_m_phase1, loss_m_phase2).mean()
 
         # ====================================================================
-        # 4. 旋转强度 R Loss
+        # 4. 旋转强度 R Loss = L1 + Sign Classification (BCE)
         # ====================================================================
         y_R = target['y_R'].reshape(batch_size, n_states)
 
         # R_pred 已经在 aggregation.py 中转换为 10^-40 cgs 单位
-        # 直接与 y_R 比较即可
-        loss_R = F.mse_loss(pred['R_pred'], y_R)
+        # 使用 L1 loss 替代 MSE，对异常值更鲁棒，减轻过拟合
+        loss_R_l1 = F.l1_loss(pred['R_pred'], y_R)
+
+        # 符号二分类：将 R 的正负作为辅助分类任务
+        y_R_sign = (y_R > 0).float()  # [B, n_states], 1=正, 0=负
+        R_sign_logits = pred['R_pred']  # 直接用 R_pred 值作 logits
+        loss_R_sign = F.binary_cross_entropy_with_logits(R_sign_logits, y_R_sign)
+
+        # R 的总 loss = L1 + 分类
+        loss_R = loss_R_l1
+
+        # 计算符号预测准确率
+        with torch.no_grad():
+            R_sign_pred = (pred['R_pred'] > 0).float()
+            r_sign_correct = (R_sign_pred == y_R_sign).float().mean()
         # ====================================================================
 
         # 损失归一化：用 EMA 跟踪每个分量的量级，归一化后再加权
@@ -132,7 +156,10 @@ class PhysECDLoss(nn.Module):
             'loss_E': loss_E.item(),
             'loss_mu': loss_mu.item(),
             'loss_m': loss_m.item(),
-            'loss_R': loss_R.item()
+            'loss_R': loss_R.item(),
+            'loss_R_l1': loss_R_l1.item(),
+            'loss_R_sign': loss_R_sign.item(),
+            'R_sign_acc': r_sign_correct.item()
         }
 
         return total_loss, loss_dict
