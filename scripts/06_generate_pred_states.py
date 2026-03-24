@@ -12,8 +12,8 @@
 """
 运行指令：
 cd到PhysECD目录下，执行以下命令：
-/home/jiangyi/.conda/envs/ecd_pred/bin/python /home/data/jiangyi/PhysECD-main/scripts/06_generate_pred_states.py --mol_id 6283
-最后的数字"6283"是分子ID，可以自己指定
+python scripts/06_generate_pred_states.py --mol_id 10934
+最后的数字"10934"是分子ID，可以自己指定
 """
 
 import sys

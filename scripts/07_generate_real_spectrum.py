@@ -13,8 +13,8 @@ Physics Formula (from 06_generate_spectrum.py):
 """
 运行指令：
 cd到PhysECD目录下，执行以下命令：
-/home/jiangyi/.conda/envs/ecd_pred/bin/python /home/data/jiangyi/PhysECD-main/scripts/07_generate_real_spectrum.py --mol_id 6283
-最后的数字”6283”是分子ID，可以自己指定
+python scripts/07_generate_real_spectrum.py --mol_id 10934
+最后的数字”10934”是分子ID，可以自己指定
 """
 
 import numpy as np
@@ -26,7 +26,7 @@ from pathlib import Path
 def parse_args():
     parser = argparse.ArgumentParser(description='Generate real ECD spectrum from CMCDS dataset')
     parser.add_argument('--input_csv', type=str,
-                        default='/home/data/jiangyi/PhysECD-main/data/CMCDS_DATASET_with_enantiomers.csv',
+                        default='data/CMCDS_DATASET_with_enantiomers.csv',
                         help='Input CSV file')
     parser.add_argument('--mol_id', type=int, required=True,
                         help='Molecule ID (e.g. 6283 or -6283)')
@@ -38,15 +38,15 @@ def parse_args():
     return parser.parse_args()
 
 
-def gaussian_broadening(E_pred, R_cgs, wavelength_grid, sigma):
+def gaussian_broadening(E_states, R_cgs, wavelength_grid, sigma):
     # R_cgs is already in 10^-40 cgs units from the CSV
     E_grid = 1240.0 / wavelength_grid
     norm_constant = 2.296e1 * sigma * np.sqrt(np.pi)
     delta_epsilon = np.zeros_like(E_grid)
 
-    for i in range(len(E_pred)):
-        gaussian = np.exp(-((E_grid - E_pred[i]) / sigma) ** 2)
-        delta_epsilon += E_pred[i] * R_cgs[i] * gaussian
+    for i in range(len(E_states)):
+        gaussian = np.exp(-((E_grid - E_states[i]) / sigma) ** 2)
+        delta_epsilon += E_states[i] * R_cgs[i] * gaussian
 
     delta_epsilon /= norm_constant
     molar_ellipticity = delta_epsilon * 3298.2
@@ -76,7 +76,7 @@ def main():
     E_pred = E_row[E_cols].values[0].astype(float)
 
     # Extract rotatory strengths (already in cgs 10^-40 units)
-    R_row = mol_data[mol_data['ECD Transition Parameters'] == 'Rotatory Strength [R(velocity)] (cgs(10**-40 erg-esu-cm/Gauss))']
+    R_row = mol_data[mol_data['ECD Transition Parameters'] == 'Rotatory Strength[R(velocity)] (cgs(10**-40 erg-esu-cm/Gauss))']
     R_cgs = R_row[E_cols].values[0].astype(float)
 
     # Generate spectrum

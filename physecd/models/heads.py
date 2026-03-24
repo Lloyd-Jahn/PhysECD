@@ -4,7 +4,7 @@ Multi-task prediction heads for atomic and molecular properties.
 Implements 5 prediction heads with proper SE(3) equivariance constraints:
 1. Excitation energies (global scalar)
 2. Atomic charges (atomic scalar)
-3. Electric dipoles (atomic polar vector, 1o)
+3. Velocity electric dipoles (atomic polar vector, 1o)
 4. Magnetic dipoles (atomic pseudo vector, 1e)
 5. Transition currents (atomic polar vector, 1o)
 """
@@ -29,7 +29,7 @@ class MultiTaskHeads(nn.Module):
     Outputs:
         E_pred: [Batch_size, 20] - excitation energies
         q_A: [N_total, 20] - atomic transition charges
-        mu_A: [N_total, 20, 3] - atomic electric dipole moments
+        mu_A_vel: [N_total, 20, 3] - atomic velocity electric dipole moments
         m_A: [N_total, 20, 3] - atomic magnetic dipole moments
         v_A: [N_total, 20, 3] - atomic transition current velocities
     """
@@ -63,17 +63,17 @@ class MultiTaskHeads(nn.Module):
             nn.Linear(num_features, n_states)
         )
 
-        # Head 3: Electric dipole moments (atomic polar vector, 1o)
+        # Head 3: Velocity electric dipole moments (atomic polar vector, 1o)
         # First project tensor features to 1o irreps
         irreps_1o = o3.Irreps([(num_features, (1, -1))])
-        self.mu_pre = o3.Linear(
+        self.mu_vel_pre = o3.Linear(
             irreps_T,
             irreps_1o,
             internal_weights=True,
             shared_weights=True
         )
         # Then project to n_states copies of 1o vectors
-        self.mu_head = o3.Linear(
+        self.mu_vel_head = o3.Linear(
             irreps_1o,
             o3.Irreps([(n_states, (1, -1))]),
             internal_weights=True,
@@ -125,7 +125,7 @@ class MultiTaskHeads(nn.Module):
         Returns:
             E_pred: [Batch_size, n_states] - excitation energies (guaranteed > 0)
             q_A: [N_total, n_states] - atomic charges
-            mu_A: [N_total, n_states, 3] - electric dipoles
+            mu_A_vel: [N_total, n_states, 3] - velocity electric dipoles
             m_A: [N_total, n_states, 3] - magnetic dipoles
             v_A: [N_total, n_states, 3] - transition currents
         """
@@ -143,11 +143,11 @@ class MultiTaskHeads(nn.Module):
         # Head 2: Atomic charges (no pooling, atomic-level)
         q_A = self.q_head(S)  # [N_total, n_states]
 
-        # Head 3: Electric dipole moments
+        # Head 3: Velocity electric dipole moments
         # Output shape: [N_total, n_states * 3] (flattened)
-        mu_flat = self.mu_head(self.mu_pre(T))  # [N_total, n_states * 3]
+        mu_vel_flat = self.mu_vel_head(self.mu_vel_pre(T))  # [N_total, n_states * 3]
         # Reshape to [N_total, n_states, 3]
-        mu_A = mu_flat.reshape(-1, self.n_states, 3)
+        mu_A_vel = mu_vel_flat.reshape(-1, self.n_states, 3)
 
         # Head 4: Magnetic dipole moments
         # Output shape: [N_total, n_states * 3] (flattened)
@@ -161,4 +161,4 @@ class MultiTaskHeads(nn.Module):
         # Reshape to [N_total, n_states, 3]
         v_A = v_flat.reshape(-1, self.n_states, 3)
 
-        return E_pred, q_A, mu_A, m_A, v_A
+        return E_pred, q_A, mu_A_vel, m_A, v_A

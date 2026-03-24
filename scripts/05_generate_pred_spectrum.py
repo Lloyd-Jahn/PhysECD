@@ -17,8 +17,8 @@ Physics Formula:
 """
 运行指令：
 cd到PhysECD目录下，执行以下命令：
-/home/jiangyi/.conda/envs/ecd_pred/bin/python /home/data/jiangyi/PhysECD-3.17修改-公式严谨性检查+单独训练R/scripts/06_generate_pred_spectrum.py --mol_id 6283
-最后的数字”6283”是分子ID，可以自己指定
+python scripts/05_generate_pred_spectrum.py --mol_id 10934
+最后的数字”10934”是分子ID，可以自己指定
 """
 
 import sys
@@ -147,7 +147,7 @@ def run_inference(model, data, device):
 
     Returns:
         E_pred: [20] predicted excitation energies (eV)
-        R_pred: [20] predicted rotatory strengths (a.u.)
+        R_pred: [20] predicted rotatory strengths (10^-40 cgs)
     """
     from torch_geometric.data import Batch
     if getattr(data, 'batch', None) is None:
@@ -159,64 +159,47 @@ def run_inference(model, data, device):
     with torch.no_grad():
         output = model(data)
 
-    E_pred = output['E_pred'][0].cpu().numpy()  # [20]
-    R_pred = output['R_pred'][0].cpu().numpy()  # [20]
+    E_pred = output['E_pred'][0].cpu().numpy()       # [20]
+    R_pred = output['R_pred'][0].cpu().numpy()       # [20], 10^-40 cgs
 
     return E_pred, R_pred
 
 
-def gaussian_broadening(E_pred, R_pred_au, wavelength_grid, sigma=0.3):
+def gaussian_broadening(E_pred, R_cgs, wavelength_grid, sigma=0.3):
     """
     Apply Gaussian broadening to generate continuous ECD spectrum.
 
     Physics Formula:
-    1. R_cgs = R_au × 471.44 (in 10^-40 cgs units)
-    2. E_grid = 1240 / λ (eV)
-    3. Δε(E) = (1 / (2.297×10^1 × σ × √π)) × Σ E_i × R_cgs,i × exp[-(E - E_i)^2 / σ^2]
+    1. E_grid = 1240 / λ (eV)
+    2. Δε(E) = (1 / (2.296×10^1 × σ × √π)) × Σ E_i × R_cgs,i × exp[-(E - E_i)^2 / σ^2]
        Note: R_cgs is a numerical value in 10^-40 cgs units, so the normalization
-       constant is 2.297×10^1 (not 2.297×10^-39 which is for absolute cgs units)
-    4. [θ] = Δε × 3298.2
+       constant is 2.296×10^1 (not 2.296×10^-39 which is for absolute cgs units)
+    3. [θ] = Δε × 3298.2
 
     Args:
         E_pred: [20] excitation energies in eV
-        R_pred_au: [20] rotatory strengths in atomic units
+        R_cgs: [20] rotatory strengths in 10^-40 cgs units
         wavelength_grid: [N] wavelength values in nm
         sigma: Gaussian broadening width in eV
 
     Returns:
         molar_ellipticity: [N] molar ellipticity values
     """
-    # Step 1: Convert R from a.u. to cgs units (10^-40 erg-esu-cm/Gauss)
-    R_cgs = R_pred_au * 471.44  # Result is in units of 10^-40 cgs
-
-    # Step 2: Convert wavelength grid to energy grid
+    # Step 1: Convert wavelength grid to energy grid
     # E (eV) = 1240 / λ (nm)
     E_grid = 1240.0 / wavelength_grid  # [N] energies in eV
 
-    # Step 3: Gaussian broadening to compute Δε
-    # Δε(E) = (1 / (2.296×10^1 × σ × √π)) × Σ E_i × R_cgs,i × exp[-(E - E_i)^2 / σ^2]
-    # Note: Since R_cgs is in units of 10^-40 cgs (numerical value without the 10^-40 factor),
-    # the normalization constant must be: 2.296×10^-39 × 10^40 = 2.296×10^1
-
-    # Normalization constant (for R in 10^-40 cgs units)
+    # Step 2: Gaussian broadening to compute Δε
     norm_constant = 2.296e1 * sigma * np.sqrt(np.pi)
-
-    # Initialize Δε array
     delta_epsilon = np.zeros_like(E_grid)
 
-    # Sum over all 20 excited states
     for i in range(len(E_pred)):
-        # Gaussian function: exp[-(E - E_i)^2 / σ^2]
         gaussian = np.exp(-((E_grid - E_pred[i]) / sigma) ** 2)
-
-        # Add contribution from this state
         delta_epsilon += E_pred[i] * R_cgs[i] * gaussian
 
-    # Apply normalization
     delta_epsilon /= norm_constant
 
-    # Step 4: Convert Δε to [θ] (molar ellipticity)
-    # [θ] (molar ellipticity) = Δε × 3298.2
+    # Step 3: Convert Δε to [θ] (molar ellipticity)
     molar_ellipticity = delta_epsilon * 3298.2
 
     return molar_ellipticity
@@ -274,12 +257,12 @@ def main():
 
     # Run inference
     print(f"\n[3/4] Running model inference...")
-    E_pred, R_pred_au = run_inference(model, data, device)
+    E_pred, R_pred = run_inference(model, data, device)
 
     print(f"  Predicted excitation energies (first 5): {E_pred[:5]}")
-    print(f"  Predicted rotatory strengths (first 5): {R_pred_au[:5]}")
+    print(f"  Predicted rotatory strengths (first 5): {R_pred[:5]}")
     print(f"  Energy range: {E_pred.min():.4f} - {E_pred.max():.4f} eV")
-    print(f"  R range: {R_pred_au.min():.4e} - {R_pred_au.max():.4e} a.u.")
+    print(f"  R range: {R_pred.min():.4e} - {R_pred.max():.4e} (10^-40 cgs)")
 
     # Generate spectrum through Gaussian broadening
     print(f"\n[4/4] Generating continuous spectrum...")
@@ -291,7 +274,7 @@ def main():
     wavelength_grid = np.arange(args.wavelength_min, args.wavelength_max + args.wavelength_step, args.wavelength_step)
 
     # Apply Gaussian broadening
-    molar_ellipticity = gaussian_broadening(E_pred, R_pred_au, wavelength_grid, sigma=args.sigma)
+    molar_ellipticity = gaussian_broadening(E_pred, R_pred, wavelength_grid, sigma=args.sigma)
 
     print(f"  Generated {len(wavelength_grid)} spectral points")
     print(f"  ECD [θ] range: {molar_ellipticity.min():.4e} - {molar_ellipticity.max():.4e} deg·cm^2/dmol")

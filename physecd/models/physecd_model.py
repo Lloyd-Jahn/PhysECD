@@ -38,7 +38,7 @@ class PhysECDModel(nn.Module):
 
     Output (dict):
         - E_pred: [Batch_size, 20] - excitation energies
-        - mu_total: [Batch_size, 20, 3] - total electric dipole moments
+        - mu_total_vel: [Batch_size, 20, 3] - total velocity electric dipole moments
         - m_total: [Batch_size, 20, 3] - total magnetic dipole moments
         - R_pred: [Batch_size, 20] - rotatory strengths
     """
@@ -91,7 +91,7 @@ class PhysECDModel(nn.Module):
         Returns:
             Dictionary containing:
                 - E_pred: [Batch_size, 20] - predicted excitation energies
-                - mu_total: [Batch_size, 20, 3] - total electric dipole moments
+                - mu_total_vel: [Batch_size, 20, 3] - total velocity electric dipole moments
                 - m_total: [Batch_size, 20, 3] - total magnetic dipole moments
                 - R_pred: [Batch_size, 20] - predicted rotatory strengths
         """
@@ -102,31 +102,31 @@ class PhysECDModel(nn.Module):
         # T: [N_total, irreps_T.dim] - tensor features
 
         # Step 2: Predict atomic-level quantum properties
-        E_pred, q_A, mu_A, m_A, v_A = self.heads(S, T, data.batch)
+        E_pred, q_A, mu_A_vel, m_A, v_A = self.heads(S, T, data.batch)
         # E_pred: [Batch_size, 20] - excitation energies
         # q_A: [N_total, 20] - atomic transition charges
-        # mu_A: [N_total, 20, 3] - atomic electric dipoles
+        # mu_A_vel: [N_total, 20, 3] - atomic velocity electric dipoles
         # m_A: [N_total, 20, 3] - atomic magnetic dipoles
         # v_A: [N_total, 20, 3] - atomic transition currents
 
         # Step 3: Aggregate atomic properties to molecular properties
-        mu_total, m_total, R_pred = self.physics_agg(
+        mu_total_vel, m_total, R_pred = self.physics_agg(
             pos=data.pos,
             batch=data.batch,
             q_A=q_A,
-            mu_A=mu_A,
+            mu_A_vel=mu_A_vel,
             m_A=m_A,
             v_A=v_A,
             E_pred=E_pred
         )
-        # mu_total: [Batch_size, 20, 3] - total electric dipole moments
+        # mu_total_vel: [Batch_size, 20, 3] - total velocity electric dipole moments
         # m_total: [Batch_size, 20, 3] - total magnetic dipole moments
         # R_pred: [Batch_size, 20] - rotatory strengths
 
         # Return all predictions
         return {
             'E_pred': E_pred,
-            'mu_total': mu_total,
+            'mu_total_vel': mu_total_vel,
             'm_total': m_total,
             'R_pred': R_pred
         }

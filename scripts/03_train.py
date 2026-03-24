@@ -1,12 +1,11 @@
 """
-Training script for PhysECD model.
+完整训练脚本（仅训练 + 验证循环）
 
-Implements complete training pipeline with:
-- Data loading
-- Model initialization
-- Training loop with validation
-- Checkpointing
-- Loss visualization
+超参数和实现与 train_full.py 完全对齐，已验证可以收敛。
+
+运行指令：
+cd 到 PhysECD 项目根目录下，执行：
+python scripts/03_train.py
 """
 
 import os
@@ -23,7 +22,7 @@ from torch_geometric.loader import DataLoader
 import matplotlib.pyplot as plt
 import numpy as np
 
-# Add project root to path
+# 将项目根目录加入 sys.path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
@@ -32,7 +31,7 @@ from physecd.physics import PhysECDLoss
 
 
 def setup_logging(log_dir):
-    """Setup logging configuration."""
+    """初始化日志配置，同时输出到文件和控制台。"""
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, 'training.log')
 
@@ -47,8 +46,8 @@ def setup_logging(log_dir):
     return logging.getLogger(__name__)
 
 
-def load_data(data_dir, batch_size=32, num_workers=4):
-    """Load training and validation datasets."""
+def load_data(data_dir, batch_size=64, num_workers=16):
+    """加载训练集和验证集。"""
     logger = logging.getLogger(__name__)
 
     train_path = os.path.join(data_dir, 'train.pt')
@@ -62,7 +61,6 @@ def load_data(data_dir, batch_size=32, num_workers=4):
     val_data = torch.load(val_path, weights_only=False)
     logger.info(f"Loaded {len(val_data)} validation samples")
 
-    # Create data loaders
     train_loader = DataLoader(
         train_data,
         batch_size=batch_size,
@@ -82,24 +80,68 @@ def load_data(data_dir, batch_size=32, num_workers=4):
     return train_loader, val_loader
 
 
+def compute_raw_losses(pred, target, n_states=20):
+    """
+    计算原始损失（未归一化的 MSE），用于监控各物理量的绝对误差。
+
+    Returns:
+        dict: 包含原始损失的字典
+    """
+    import torch.nn.functional as F
+
+    batch_size = pred['E_pred'].shape[0]
+
+    # 1. 激发能原始 MSE
+    y_E = target['y_E'].reshape(batch_size, n_states)
+    loss_E_raw = F.mse_loss(pred['E_pred'], y_E)
+
+    # 2. 速度电跃迁偶极原始 MSE（相位不变）
+    y_mu_vel = target['y_mu_vel'].reshape(batch_size, n_states, 3)
+    mu_vel_diff = pred['mu_total_vel'] - y_mu_vel
+    mu_vel_sum = pred['mu_total_vel'] + y_mu_vel
+    loss_mu_vel_phase1 = (mu_vel_diff ** 2).sum(dim=-1)
+    loss_mu_vel_phase2 = (mu_vel_sum ** 2).sum(dim=-1)
+    loss_mu_vel_raw = torch.min(loss_mu_vel_phase1, loss_mu_vel_phase2).mean()
+
+    # 3. 磁跃迁偶极原始 MSE（相位不变）
+    y_m = target['y_m'].reshape(batch_size, n_states, 3)
+    m_diff = pred['m_total'] - y_m
+    m_sum = pred['m_total'] + y_m
+    loss_m_phase1 = (m_diff ** 2).sum(dim=-1)
+    loss_m_phase2 = (m_sum ** 2).sum(dim=-1)
+    loss_m_raw = torch.min(loss_m_phase1, loss_m_phase2).mean()
+
+    # 4. 旋转强度原始 MSE
+    y_R = target['y_R'].reshape(batch_size, n_states)
+    loss_R_raw = F.mse_loss(pred['R_pred'], y_R)
+
+    return {
+        'loss_E_raw': loss_E_raw.item(),
+        'loss_mu_vel_raw': loss_mu_vel_raw.item(),
+        'loss_m_raw': loss_m_raw.item(),
+        'loss_R_raw': loss_R_raw.item(),
+    }
+
+
 def train_epoch(model, loader, criterion, optimizer, device, logger):
-    """Train for one epoch."""
+    """训练一个 epoch，返回归一化损失和原始损失。"""
     model.train()
 
     total_loss = 0.0
-    loss_components = {'loss_E': 0.0, 'loss_mu': 0.0, 'loss_m': 0.0, 'loss_R': 0.0}
+    total_raw_losses = {'loss_E_raw': 0.0, 'loss_mu_vel_raw': 0.0, 'loss_m_raw': 0.0, 'loss_R_raw': 0.0}
+    loss_components = {'loss_E': 0.0, 'loss_mu_vel': 0.0, 'loss_m': 0.0, 'loss_R': 0.0, 'loss_R_sign': 0.0}
+    total_r_sign_acc = 0.0
     num_batches = 0
 
     start_time = time.time()
 
     for batch_idx, data in enumerate(loader):
-        # Move data to device
         data = data.to(device)
 
-        # Forward pass
+        # 前向传播
         pred = model(data)
 
-        # Prepare target dictionary
+        # 准备标签字典
         target = {
             'y_E': data.y_E,
             'y_mu_vel': data.y_mu_vel,
@@ -107,64 +149,73 @@ def train_epoch(model, loader, criterion, optimizer, device, logger):
             'y_R': data.y_R
         }
 
-        # Compute loss
+        # 计算损失
         loss, loss_dict = criterion(pred, target)
 
-        # Backward pass
+        # 计算原始损失（用于监控）
+        raw_losses = compute_raw_losses(pred, target, n_states=model.n_states)
+
+        # 反向传播
         optimizer.zero_grad()
         loss.backward()
-
-        # Gradient clipping to prevent NaN
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
         optimizer.step()
 
-        # Accumulate losses
+        # 累积损失
         total_loss += loss_dict['loss']
         for key in loss_components:
             loss_components[key] += loss_dict[key]
+        for key in total_raw_losses:
+            total_raw_losses[key] += raw_losses[key]
+        total_r_sign_acc += loss_dict['R_sign_acc']
         num_batches += 1
 
-        # Log progress every 10 batches
+        # 每 10 个 batch 打印一次进度
         if (batch_idx + 1) % 10 == 0:
-            avg_loss = total_loss / num_batches
             logger.info(
                 f"  Batch [{batch_idx + 1}/{len(loader)}] "
-                f"Loss: {avg_loss:.4f} "
+                f"Loss: {total_loss / num_batches:.4f} "
                 f"(E: {loss_dict['loss_E']:.4f}, "
-                f"mu: {loss_dict['loss_mu']:.4f}, "
+                f"mu_vel: {loss_dict['loss_mu_vel']:.4f}, "
                 f"m: {loss_dict['loss_m']:.4f}, "
-                f"R: {loss_dict['loss_R']:.4f})"
+                f"R: {loss_dict['loss_R']:.4f}) "
+                f"R_sign_acc: {loss_dict['R_sign_acc']:.4f}"
             )
 
-    # Compute epoch averages
+    # 计算 epoch 平均值
     avg_loss = total_loss / num_batches
     for key in loss_components:
         loss_components[key] /= num_batches
+    for key in total_raw_losses:
+        total_raw_losses[key] /= num_batches
+    avg_r_sign_acc = total_r_sign_acc / num_batches
+
+    loss_components['loss'] = avg_loss
+    loss_components['R_sign_acc'] = avg_r_sign_acc
+    loss_components.update(total_raw_losses)
 
     elapsed = time.time() - start_time
     logger.info(f"  Training epoch completed in {elapsed:.2f}s")
 
-    return avg_loss, loss_components
+    return loss_components
 
 
 @torch.no_grad()
 def validate(model, loader, criterion, device, logger):
-    """Validate model."""
+    """在验证集上评估模型，返回归一化损失和原始损失。"""
     model.eval()
 
     total_loss = 0.0
-    loss_components = {'loss_E': 0.0, 'loss_mu': 0.0, 'loss_m': 0.0, 'loss_R': 0.0}
+    total_raw_losses = {'loss_E_raw': 0.0, 'loss_mu_vel_raw': 0.0, 'loss_m_raw': 0.0, 'loss_R_raw': 0.0}
+    loss_components = {'loss_E': 0.0, 'loss_mu_vel': 0.0, 'loss_m': 0.0, 'loss_R': 0.0, 'loss_R_sign': 0.0}
+    total_r_sign_acc = 0.0
     num_batches = 0
 
     for data in loader:
-        # Move data to device
         data = data.to(device)
 
-        # Forward pass
         pred = model(data)
 
-        # Prepare target dictionary
         target = {
             'y_E': data.y_E,
             'y_mu_vel': data.y_mu_vel,
@@ -172,77 +223,129 @@ def validate(model, loader, criterion, device, logger):
             'y_R': data.y_R
         }
 
-        # Compute loss
         loss, loss_dict = criterion(pred, target)
+        raw_losses = compute_raw_losses(pred, target, n_states=model.n_states)
 
-        # Accumulate losses
         total_loss += loss_dict['loss']
         for key in loss_components:
             loss_components[key] += loss_dict[key]
+        for key in total_raw_losses:
+            total_raw_losses[key] += raw_losses[key]
+        total_r_sign_acc += loss_dict['R_sign_acc']
         num_batches += 1
 
-    # Compute averages
     avg_loss = total_loss / num_batches
     for key in loss_components:
         loss_components[key] /= num_batches
+    for key in total_raw_losses:
+        total_raw_losses[key] /= num_batches
+    avg_r_sign_acc = total_r_sign_acc / num_batches
 
-    return avg_loss, loss_components
+    loss_components['loss'] = avg_loss
+    loss_components['R_sign_acc'] = avg_r_sign_acc
+    loss_components.update(total_raw_losses)
+
+    return loss_components
 
 
 def plot_loss_curves(train_losses, val_losses, save_path):
-    """Plot and save training/validation loss curves."""
-    plt.figure(figsize=(15, 10))
+    """绘制并保存训练/验证损失曲线（3×3，9 个子图）。"""
+    fig = plt.figure(figsize=(20, 12))
 
-    # Main plot: total loss
-    plt.subplot(2, 3, 1)
     epochs = range(1, len(train_losses['total']) + 1)
+
+    # 第 1 行：归一化总损失 + 各分量归一化损失
+    plt.subplot(3, 3, 1)
     plt.plot(epochs, train_losses['total'], 'b-', label='Train', linewidth=2)
     plt.plot(epochs, val_losses['total'], 'r-', label='Validation', linewidth=2)
     plt.xlabel('Epoch')
-    plt.ylabel('Total Loss')
-    plt.title('Training and Validation Loss')
+    plt.ylabel('Normalized Loss')
+    plt.title('Total Normalized Loss')
     plt.legend()
     plt.grid(True, alpha=0.3)
+    plt.yscale('log')
 
-    # Subplot: Energy loss
-    plt.subplot(2, 3, 2)
+    plt.subplot(3, 3, 2)
     plt.plot(epochs, train_losses['E'], 'b-', label='Train', linewidth=2)
     plt.plot(epochs, val_losses['E'], 'r-', label='Validation', linewidth=2)
     plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Excitation Energy Loss')
+    plt.ylabel('Normalized Loss')
+    plt.title('Excitation Energy Loss (Normalized)')
     plt.legend()
     plt.grid(True, alpha=0.3)
+    plt.yscale('log')
 
-    # Subplot: Electric dipole loss
-    plt.subplot(2, 3, 3)
-    plt.plot(epochs, train_losses['mu'], 'b-', label='Train', linewidth=2)
-    plt.plot(epochs, val_losses['mu'], 'r-', label='Validation', linewidth=2)
+    plt.subplot(3, 3, 3)
+    plt.plot(epochs, train_losses['mu_vel'], 'b-', label='Train', linewidth=2)
+    plt.plot(epochs, val_losses['mu_vel'], 'r-', label='Validation', linewidth=2)
     plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Electric Dipole Loss')
+    plt.ylabel('Normalized Loss')
+    plt.title('Velocity Electric Dipole Loss (Normalized)')
     plt.legend()
     plt.grid(True, alpha=0.3)
+    plt.yscale('log')
 
-    # Subplot: Magnetic dipole loss
-    plt.subplot(2, 3, 4)
+    # 第 2 行：磁偶极矩归一化 + R 归一化 + 激发能原始 MSE
+    plt.subplot(3, 3, 4)
     plt.plot(epochs, train_losses['m'], 'b-', label='Train', linewidth=2)
     plt.plot(epochs, val_losses['m'], 'r-', label='Validation', linewidth=2)
     plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Magnetic Dipole Loss')
+    plt.ylabel('Normalized Loss')
+    plt.title('Magnetic Dipole Loss (Normalized)')
     plt.legend()
     plt.grid(True, alpha=0.3)
+    plt.yscale('log')
 
-    # Subplot: Rotatory strength loss
-    plt.subplot(2, 3, 5)
+    plt.subplot(3, 3, 5)
     plt.plot(epochs, train_losses['R'], 'b-', label='Train', linewidth=2)
     plt.plot(epochs, val_losses['R'], 'r-', label='Validation', linewidth=2)
     plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Rotatory Strength Loss')
+    plt.ylabel('Normalized Loss')
+    plt.title('Rotatory Strength Loss (Normalized)')
     plt.legend()
     plt.grid(True, alpha=0.3)
+    plt.yscale('log')
+
+    plt.subplot(3, 3, 6)
+    plt.plot(epochs, train_losses['E_raw'], 'b-', label='Train (Raw)', linewidth=2)
+    plt.plot(epochs, val_losses['E_raw'], 'r-', label='Val (Raw)', linewidth=2)
+    plt.xlabel('Epoch')
+    plt.ylabel('MSE Loss')
+    plt.title('Excitation Energy Loss (Raw MSE)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.yscale('log')
+
+    # 第 3 行：速度电偶极矩、磁偶极矩、旋转强度的原始 MSE
+    plt.subplot(3, 3, 7)
+    plt.plot(epochs, train_losses['mu_vel_raw'], 'b-', label='Train (Raw)', linewidth=2)
+    plt.plot(epochs, val_losses['mu_vel_raw'], 'r-', label='Val (Raw)', linewidth=2)
+    plt.xlabel('Epoch')
+    plt.ylabel('MSE Loss')
+    plt.title('Velocity Electric Dipole Loss (Raw MSE)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.yscale('log')
+
+    plt.subplot(3, 3, 8)
+    plt.plot(epochs, train_losses['m_raw'], 'b-', label='Train (Raw)', linewidth=2)
+    plt.plot(epochs, val_losses['m_raw'], 'r-', label='Val (Raw)', linewidth=2)
+    plt.xlabel('Epoch')
+    plt.ylabel('MSE Loss')
+    plt.title('Magnetic Dipole Loss (Raw MSE)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.yscale('log')
+
+    plt.subplot(3, 3, 9)
+    plt.plot(epochs, train_losses['R_raw'], 'b-', label='Train (Raw)', linewidth=2)
+    plt.plot(epochs, val_losses['R_raw'], 'r-', label='Val (Raw)', linewidth=2)
+    plt.xlabel('Epoch')
+    plt.ylabel('MSE Loss')
+    plt.title('Rotatory Strength Loss (Raw MSE)')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.yscale('log')
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -250,35 +353,31 @@ def plot_loss_curves(train_losses, val_losses, save_path):
 
 
 def main():
-    """Main training function."""
-    # Configuration
+    """主训练函数。"""
     config = {
         'data_dir': 'data/processed_with_enantiomers',
         'checkpoint_dir': 'checkpoints',
-        'batch_size': 32,
-        'num_epochs': 25,
+        'batch_size': 64,
+        'num_epochs': 1000,
         'learning_rate': 1e-3,
         'weight_decay': 1e-5,
-        'num_workers': 4,
-        # Model hyperparameters
+        'num_workers': 16,
+        # 模型超参数
         'num_features': 128,
-        'max_l': 2,
+        'max_l': 3,
         'num_blocks': 3,
         'num_radial': 32,
-        'cutoff': 5.0,
+        'cutoff': 50.0,
         'n_states': 20,
         'max_atomic_number': 60,
-        
-        # ==========================================
-        # Loss Weights（归一化后的相对权重）
-        # ==========================================
+        # 损失权重（EMA 归一化后的相对权重）
         'lambda_E': 1.0,
-        'lambda_mu': 1.0,
-        'lambda_m': 1.0,
+        'lambda_mu_vel': 1.0,
+        'lambda_m': 0.0,
         'lambda_R': 1.0,
+        'lambda_R_sign': 0.0,
     }
 
-    # Setup
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logger = setup_logging(config['checkpoint_dir'])
 
@@ -288,7 +387,7 @@ def main():
     logger.info(f"Device: {device}")
     logger.info(f"Configuration: {config}")
 
-    # Load data
+    # 加载数据
     logger.info("\nLoading data...")
     train_loader, val_loader = load_data(
         config['data_dir'],
@@ -296,7 +395,7 @@ def main():
         num_workers=config['num_workers']
     )
 
-    # Initialize model
+    # 初始化模型
     logger.info("\nInitializing model...")
     model = PhysECDModel(
         num_features=config['num_features'],
@@ -311,32 +410,41 @@ def main():
     num_params = model.get_num_params()
     logger.info(f"Model initialized with {num_params:,} trainable parameters")
 
-    # Initialize loss function
+    # 初始化损失函数
     criterion = PhysECDLoss(
         lambda_E=config['lambda_E'],
-        lambda_mu=config['lambda_mu'],
+        lambda_mu_vel=config['lambda_mu_vel'],
         lambda_m=config['lambda_m'],
-        lambda_R=config['lambda_R']
+        lambda_R=config['lambda_R'],
+        lambda_R_sign=config['lambda_R_sign']
     ).to(device)
 
-    # Initialize optimizer and scheduler
+    # 初始化优化器和学习率调度器
     optimizer = AdamW(
         model.parameters(),
         lr=config['learning_rate'],
         weight_decay=config['weight_decay']
     )
 
+    # 余弦退火：每 num_epochs/5 个 epoch 为一个完整周期
     scheduler = CosineAnnealingLR(
         optimizer,
-        T_max=config['num_epochs']
+        eta_min=1e-5,
+        T_max=config['num_epochs'] // 5
     )
 
-    # Training tracking
+    # 训练记录
     best_val_loss = float('inf')
-    train_losses = {'total': [], 'E': [], 'mu': [], 'm': [], 'R': []}
-    val_losses = {'total': [], 'E': [], 'mu': [], 'm': [], 'R': []}
+    train_losses = {
+        'total': [], 'E': [], 'mu_vel': [], 'm': [], 'R': [], 'R_sign_acc': [],
+        'E_raw': [], 'mu_vel_raw': [], 'm_raw': [], 'R_raw': []
+    }
+    val_losses = {
+        'total': [], 'E': [], 'mu_vel': [], 'm': [], 'R': [], 'R_sign_acc': [],
+        'E_raw': [], 'mu_vel_raw': [], 'm_raw': [], 'R_raw': []
+    }
 
-    # Training loop
+    # 训练循环
     logger.info("\nStarting training...")
     logger.info("=" * 80)
 
@@ -344,71 +452,75 @@ def main():
         logger.info(f"\nEpoch {epoch}/{config['num_epochs']}")
         logger.info("-" * 80)
 
-        # Train
-        train_loss, train_components = train_epoch(
+        # 训练一个 epoch
+        train_components = train_epoch(
             model, train_loader, criterion, optimizer, device, logger
         )
 
-        # Validate
+        # 验证
         logger.info("  Running validation...")
-        val_loss, val_components = validate(
+        val_components = validate(
             model, val_loader, criterion, device, logger
         )
 
-        # Update learning rate
+        # 更新学习率
         scheduler.step()
         current_lr = scheduler.get_last_lr()[0]
 
-        # Log epoch summary
+        # 打印 epoch 总结
         logger.info("-" * 80)
         logger.info(
             f"Epoch {epoch} Summary - "
-            f"Train Loss: {train_loss:.4f}, "
-            f"Val Loss: {val_loss:.4f}, "
+            f"Train Loss: {train_components['loss']:.4f}, "
+            f"Val Loss: {val_components['loss']:.4f}, "
             f"LR: {current_lr:.6f}"
         )
         logger.info(
-            f"  Train: E={train_components['loss_E']:.4f}, "
-            f"mu={train_components['loss_mu']:.4f}, "
-            f"m={train_components['loss_m']:.4f}, "
-            f"R={train_components['loss_R']:.4f}"
+            f"  Raw MSE - Train: E={train_components['loss_E_raw']:.4f}, "
+            f"mu_vel={train_components['loss_mu_vel_raw']:.4f}, "
+            f"m={train_components['loss_m_raw']:.4f}, "
+            f"R={train_components['loss_R_raw']:.4f}"
         )
         logger.info(
-            f"  Val:   E={val_components['loss_E']:.4f}, "
-            f"mu={val_components['loss_mu']:.4f}, "
-            f"m={val_components['loss_m']:.4f}, "
-            f"R={val_components['loss_R']:.4f}"
+            f"  Raw MSE - Val:   E={val_components['loss_E_raw']:.4f}, "
+            f"mu_vel={val_components['loss_mu_vel_raw']:.4f}, "
+            f"m={val_components['loss_m_raw']:.4f}, "
+            f"R={val_components['loss_R_raw']:.4f}"
+        )
+        logger.info(
+            f"  R Sign Acc: Train={train_components['R_sign_acc']:.4f}, "
+            f"Val={val_components['R_sign_acc']:.4f}"
         )
 
-        # Store losses for plotting
-        train_losses['total'].append(train_loss)
-        train_losses['E'].append(train_components['loss_E'])
-        train_losses['mu'].append(train_components['loss_mu'])
-        train_losses['m'].append(train_components['loss_m'])
-        train_losses['R'].append(train_components['loss_R'])
+        # 记录损失曲线数据
+        key_map = {
+            'total': 'loss', 'E': 'loss_E', 'mu_vel': 'loss_mu_vel', 'm': 'loss_m',
+            'R': 'loss_R', 'R_sign_acc': 'R_sign_acc',
+            'E_raw': 'loss_E_raw', 'mu_vel_raw': 'loss_mu_vel_raw',
+            'm_raw': 'loss_m_raw', 'R_raw': 'loss_R_raw'
+        }
+        for plot_key, comp_key in key_map.items():
+            if comp_key in train_components:
+                train_losses[plot_key].append(train_components[comp_key])
+            if comp_key in val_components:
+                val_losses[plot_key].append(val_components[comp_key])
 
-        val_losses['total'].append(val_loss)
-        val_losses['E'].append(val_components['loss_E'])
-        val_losses['mu'].append(val_components['loss_mu'])
-        val_losses['m'].append(val_components['loss_m'])
-        val_losses['R'].append(val_components['loss_R'])
-
-        # Save best model
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        # 保存最佳模型
+        if val_components['loss'] < best_val_loss:
+            best_val_loss = val_components['loss']
             checkpoint_path = os.path.join(config['checkpoint_dir'], 'best_model.pt')
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
-                'val_loss': val_loss,
+                'val_loss': val_components['loss'],
                 'config': config
             }, checkpoint_path)
-            logger.info(f"  Saved best model (val_loss: {val_loss:.4f})")
+            logger.info(f"  Saved best model (val_loss: {val_components['loss']:.4f})")
 
-        # Save checkpoint every 10 epochs
-        if epoch % 10 == 0:
+        # 每 100 epoch 保存一次 checkpoint
+        if epoch % 100 == 0:
             checkpoint_path = os.path.join(
                 config['checkpoint_dir'],
                 f'checkpoint_epoch_{epoch}.pt'
@@ -418,25 +530,26 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
-                'val_loss': val_loss,
+                'val_loss': val_components['loss'],
                 'config': config
             }, checkpoint_path)
             logger.info(f"  Saved checkpoint at epoch {epoch}")
 
-        # Plot loss curves
+        # 每 5 epoch 更新一次损失曲线图
         if epoch % 5 == 0 or epoch == 1:
             plot_path = os.path.join(config['checkpoint_dir'], 'loss_curves.png')
             plot_loss_curves(train_losses, val_losses, plot_path)
             logger.info(f"  Updated loss curves plot")
 
-    # Final summary
+    # 训练完成
     logger.info("\n" + "=" * 80)
     logger.info("Training completed!")
+    logger.info("=" * 80)
     logger.info(f"Best validation loss: {best_val_loss:.4f}")
-    logger.info(f"Model saved to: {os.path.join(config['checkpoint_dir'], 'best_model.pt')}")
+    logger.info(f"Best model saved to: {os.path.join(config['checkpoint_dir'], 'best_model.pt')}")
     logger.info("=" * 80)
 
-    # Final plot
+    # 保存最终损失曲线图
     plot_path = os.path.join(config['checkpoint_dir'], 'loss_curves_final.png')
     plot_loss_curves(train_losses, val_losses, plot_path)
 

@@ -15,13 +15,13 @@ class PhysECDLoss(nn.Module):
 
     Computes weighted mean squared error across 4 physical quantities:
     1. Excitation energies (E)
-    2. Electric dipole moments (mu)
+    2. Velocity electric dipole moments (mu_vel)
     3. Magnetic dipole moments (m)
     4. Rotatory strengths (R)
 
     Args:
         lambda_E: Weight for excitation energy loss (default: 1.0)
-        lambda_mu: Weight for electric dipole loss (default: 1.0)
+        lambda_mu_vel: Weight for velocity electric dipole loss (default: 1.0)
         lambda_m: Weight for magnetic dipole loss (default: 1.0)
         lambda_R: Weight for rotatory strength loss (default: 1.0)
         lambda_R_sign: Weight for R sign classification loss (default: 1.0)
@@ -31,7 +31,7 @@ class PhysECDLoss(nn.Module):
     def __init__(
         self,
         lambda_E=1.0,
-        lambda_mu=1.0,
+        lambda_mu_vel=1.0,
         lambda_m=1.0,
         lambda_R=1.0,
         lambda_R_sign=1.0,
@@ -40,7 +40,7 @@ class PhysECDLoss(nn.Module):
         super().__init__()
 
         self.lambda_E = lambda_E
-        self.lambda_mu = lambda_mu
+        self.lambda_mu_vel = lambda_mu_vel
         self.lambda_m = lambda_m
         self.lambda_R = lambda_R
         self.lambda_R_sign = lambda_R_sign
@@ -48,7 +48,7 @@ class PhysECDLoss(nn.Module):
         # 损失归一化：用指数移动平均跟踪每个分量的量级
         self.ema_decay = ema_decay
         self.register_buffer('ema_E', torch.tensor(0.0))
-        self.register_buffer('ema_mu', torch.tensor(0.0))
+        self.register_buffer('ema_mu_vel', torch.tensor(0.0))
         self.register_buffer('ema_m', torch.tensor(0.0))
         self.register_buffer('ema_R', torch.tensor(0.0))
         self.register_buffer('initialized', torch.tensor(False))
@@ -83,12 +83,12 @@ class PhysECDLoss(nn.Module):
         loss_E = F.mse_loss(pred['E_pred'], y_E)
 
         # 2. 电跃迁偶极 (Velocity Dipole) Loss - Phase-Invariant
-        y_mu = target['y_mu_vel'].reshape(batch_size, n_states, 3)
-        mu_diff = pred['mu_total'] - y_mu
-        mu_sum = pred['mu_total'] + y_mu
-        loss_mu_phase1 = (mu_diff ** 2).sum(dim=-1)  # [B, n_states]
-        loss_mu_phase2 = (mu_sum ** 2).sum(dim=-1)   # [B, n_states]
-        loss_mu = torch.min(loss_mu_phase1, loss_mu_phase2).mean()
+        y_mu_vel = target['y_mu_vel'].reshape(batch_size, n_states, 3)
+        mu_vel_diff = pred['mu_total_vel'] - y_mu_vel
+        mu_vel_sum = pred['mu_total_vel'] + y_mu_vel
+        loss_mu_vel_phase1 = (mu_vel_diff ** 2).sum(dim=-1)  # [B, n_states]
+        loss_mu_vel_phase2 = (mu_vel_sum ** 2).sum(dim=-1)   # [B, n_states]
+        loss_mu_vel = torch.min(loss_mu_vel_phase1, loss_mu_vel_phase2).mean()
 
         # 3. 磁跃迁偶极 Loss - Phase-Invariant
         y_m = target['y_m'].reshape(batch_size, n_states, 3)
@@ -125,28 +125,28 @@ class PhysECDLoss(nn.Module):
         with torch.no_grad():
             if not self.initialized:
                 self.ema_E.copy_(loss_E.detach())
-                self.ema_mu.copy_(loss_mu.detach())
+                self.ema_mu_vel.copy_(loss_mu_vel.detach())
                 self.ema_m.copy_(loss_m.detach())
                 self.ema_R.copy_(loss_R.detach())
                 self.initialized.fill_(True)
             else:
                 d = self.ema_decay
                 self.ema_E.mul_(d).add_(loss_E.detach(), alpha=1 - d)
-                self.ema_mu.mul_(d).add_(loss_mu.detach(), alpha=1 - d)
+                self.ema_mu_vel.mul_(d).add_(loss_mu_vel.detach(), alpha=1 - d)
                 self.ema_m.mul_(d).add_(loss_m.detach(), alpha=1 - d)
                 self.ema_R.mul_(d).add_(loss_R.detach(), alpha=1 - d)
 
         # 用 EMA 值做归一化（加 eps 防除零）
         eps = 1e-8
         norm_E = loss_E / (self.ema_E + eps)
-        norm_mu = loss_mu / (self.ema_mu + eps)
+        norm_mu_vel = loss_mu_vel / (self.ema_mu_vel + eps)
         norm_m = loss_m / (self.ema_m + eps)
         norm_R = loss_R / (self.ema_R + eps)
 
         # Weighted total loss
         total_loss = (
             self.lambda_E * norm_E +
-            self.lambda_mu * norm_mu +
+            self.lambda_mu_vel * norm_mu_vel +
             self.lambda_m * norm_m +
             self.lambda_R * norm_R
         )
@@ -154,7 +154,7 @@ class PhysECDLoss(nn.Module):
         loss_dict = {
             'loss': total_loss.item(),
             'loss_E': loss_E.item(),
-            'loss_mu': loss_mu.item(),
+            'loss_mu_vel': loss_mu_vel.item(),
             'loss_m': loss_m.item(),
             'loss_R': loss_R.item(),
             'loss_R_l1': loss_R_l1.item(),
