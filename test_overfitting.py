@@ -104,6 +104,8 @@ def compute_raw_losses(pred, target, n_states=20):
     # 4. 旋转强度 R Loss
     y_R = target['y_R'].reshape(batch_size, n_states)
     loss_R_raw = F.mse_loss(pred['R_pred'], y_R)
+    # import ipdb
+    # ipdb.set_trace()
     
     return {
         'loss_E_raw': loss_E_raw.item(),
@@ -484,7 +486,7 @@ def main():
         'data_dir': 'data/processed_with_enantiomers',
         'output_dir': 'overfit_test',
         'batch_size': 1024,
-        'num_steps': 5000,  # 训练步数（替代 epoch）
+        'num_steps': 10000,  # 训练步数（替代 epoch）
         'eval_interval': 50,  # 每隔多少步验证一次
         'learning_rate': 2e-3,
         'weight_decay': 1e-5,
@@ -501,7 +503,7 @@ def main():
         # Loss Weights（归一化后的相对权重）- 完全照搬
         'lambda_E': 1.0,
         'lambda_mu': 1.0,
-        'lambda_m': 0.0,
+        'lambda_m': 1.0,
         'lambda_R': 1.0,
         'lambda_R_sign': 0.0,
     }

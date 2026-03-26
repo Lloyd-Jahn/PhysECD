@@ -7,4 +7,6 @@ checkpoints/
 overfit_test/
 *.pyc
 *.log
+checkpoints_new/
+
 

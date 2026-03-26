@@ -93,10 +93,11 @@ def load_data(data_dir, batch_size=64, num_workers=4):
 
 def compute_raw_losses(pred, target, n_states=20):
     """
-    计算原始损失（未归一化的 MSE）。
+    计算原始损失（未归一化的 MSE/L1）。
     
     Returns:
-        dict: 包含原始损失的字典
+        dict: 包含原始损失的字典，键名为 raw_loss_E, raw_loss_mu 等
+               以及 R_sign_acc 用于帕累托前沿
     """
     import torch.nn.functional as F
     
@@ -104,7 +105,7 @@ def compute_raw_losses(pred, target, n_states=20):
     
     # 1. 激发能 Loss
     y_E = target['y_E'].reshape(batch_size, n_states)
-    loss_E_raw = F.mse_loss(pred['E_pred'], y_E)
+    raw_loss_E = F.mse_loss(pred['E_pred'], y_E)
     
     # 2. 电跃迁偶极 Loss - Phase-Invariant
     y_mu = target['y_mu_vel'].reshape(batch_size, n_states, 3)
@@ -112,7 +113,7 @@ def compute_raw_losses(pred, target, n_states=20):
     mu_sum = pred['mu_total'] + y_mu
     loss_mu_phase1 = (mu_diff ** 2).sum(dim=-1)
     loss_mu_phase2 = (mu_sum ** 2).sum(dim=-1)
-    loss_mu_raw = torch.min(loss_mu_phase1, loss_mu_phase2).mean()
+    raw_loss_mu = torch.min(loss_mu_phase1, loss_mu_phase2).mean()
     
     # 3. 磁跃迁偶极 Loss - Phase-Invariant
     y_m = target['y_m'].reshape(batch_size, n_states, 3)
@@ -120,17 +121,19 @@ def compute_raw_losses(pred, target, n_states=20):
     m_sum = pred['m_total'] + y_m
     loss_m_phase1 = (m_diff ** 2).sum(dim=-1)
     loss_m_phase2 = (m_sum ** 2).sum(dim=-1)
-    loss_m_raw = torch.min(loss_m_phase1, loss_m_phase2).mean()
+    raw_loss_m = torch.min(loss_m_phase1, loss_m_phase2).mean()
     
-    # 4. 旋转强度 R Loss
+    # 4. 旋转强度 R - 使用 Sign Accuracy 而不是 L1 loss
     y_R = target['y_R'].reshape(batch_size, n_states)
-    loss_R_raw = F.mse_loss(pred['R_pred'], y_R)
+    y_R_sign = (y_R > 0).float()
+    R_sign_pred = (pred['R_pred'] > 0).float()
+    R_sign_acc = (R_sign_pred == y_R_sign).float().mean()
     
     return {
-        'loss_E_raw': loss_E_raw.item(),
-        'loss_mu_raw': loss_mu_raw.item(),
-        'loss_m_raw': loss_m_raw.item(),
-        'loss_R_raw': loss_R_raw.item(),
+        'raw_loss_E': raw_loss_E.item(),
+        'raw_loss_mu': raw_loss_mu.item(),
+        'raw_loss_m': raw_loss_m.item(),
+        'R_sign_acc': R_sign_acc.item(),  # 使用 sign accuracy 而不是 raw_loss_R
     }
 
 
@@ -138,10 +141,8 @@ def train_epoch(model, loader, criterion, optimizer, device, logger):
     """训练一个 epoch。"""
     model.train()
 
-    total_loss = 0.0
-    total_raw_losses = {'loss_E_raw': 0.0, 'loss_mu_raw': 0.0, 'loss_m_raw': 0.0, 'loss_R_raw': 0.0}
-    loss_components = {'loss_E': 0.0, 'loss_mu': 0.0, 'loss_m': 0.0, 'loss_R': 0.0, 'loss_R_sign': 0.0}
-    total_r_sign_acc = 0.0
+    # 使用字典来累积所有损失，提高扩展性
+    accumulated_losses = {}
     num_batches = 0
 
     start_time = time.time()
@@ -163,8 +164,10 @@ def train_epoch(model, loader, criterion, optimizer, device, logger):
         # Compute loss
         loss, loss_dict = criterion(pred, target)
         
-        # Compute raw losses
+        # Compute raw losses (用于帕累托最优)
         raw_losses = compute_raw_losses(pred, target, n_states=model.n_states)
+        # 合并到 loss_dict
+        loss_dict.update(raw_losses)
 
         # Backward pass
         optimizer.zero_grad()
@@ -172,43 +175,32 @@ def train_epoch(model, loader, criterion, optimizer, device, logger):
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
-        # Accumulate losses
-        total_loss += loss_dict['loss']
-        for key in loss_components:
-            loss_components[key] += loss_dict[key]
-        for key in total_raw_losses:
-            total_raw_losses[key] += raw_losses[key]
-        total_r_sign_acc += loss_dict['R_sign_acc']
+        # Accumulate losses (动态处理所有键)
+        for key, value in loss_dict.items():
+            if key not in accumulated_losses:
+                accumulated_losses[key] = 0.0
+            accumulated_losses[key] += value
         num_batches += 1
 
         # Log progress every 10 batches
         if (batch_idx + 1) % 10 == 0:
+            # 动态构建日志字符串
+            loss_parts = [f"{k}: {v:.4f}" for k, v in loss_dict.items() 
+                         if k.startswith('loss_') and not k.startswith('loss_R_sign')][:5]
             logger.info(
                 f"  Batch [{batch_idx + 1}/{len(loader)}] "
-                f"Loss: {total_loss / num_batches:.4f} "
-                f"(E: {loss_dict['loss_E']:.4f}, "
-                f"mu: {loss_dict['loss_mu']:.4f}, "
-                f"m: {loss_dict['loss_m']:.4f}, "
-                f"R: {loss_dict['loss_R']:.4f}) "
-                f"R_sign_acc: {loss_dict['R_sign_acc']:.4f}"
+                f"Loss: {loss_dict['loss']:.4f} "
+                f"({', '.join(loss_parts)}) "
+                f"R_sign_acc: {loss_dict.get('R_sign_acc', 0):.4f}"
             )
 
     # Compute epoch averages
-    avg_loss = total_loss / num_batches
-    for key in loss_components:
-        loss_components[key] /= num_batches
-    for key in total_raw_losses:
-        total_raw_losses[key] /= num_batches
-    avg_r_sign_acc = total_r_sign_acc / num_batches
-    
-    loss_components['loss'] = avg_loss
-    loss_components['R_sign_acc'] = avg_r_sign_acc
-    loss_components.update(total_raw_losses)
+    avg_losses = {key: value / num_batches for key, value in accumulated_losses.items()}
 
     elapsed = time.time() - start_time
     logger.info(f"  Training epoch completed in {elapsed:.2f}s")
 
-    return loss_components
+    return avg_losses
 
 
 @torch.no_grad()
@@ -216,10 +208,8 @@ def validate(model, loader, criterion, device, logger):
     """验证模型。"""
     model.eval()
 
-    total_loss = 0.0
-    total_raw_losses = {'loss_E_raw': 0.0, 'loss_mu_raw': 0.0, 'loss_m_raw': 0.0, 'loss_R_raw': 0.0}
-    loss_components = {'loss_E': 0.0, 'loss_mu': 0.0, 'loss_m': 0.0, 'loss_R': 0.0, 'loss_R_sign': 0.0}
-    total_r_sign_acc = 0.0
+    # 使用字典来累积所有损失
+    accumulated_losses = {}
     num_batches = 0
 
     for data in loader:
@@ -239,31 +229,22 @@ def validate(model, loader, criterion, device, logger):
         # Compute loss
         loss, loss_dict = criterion(pred, target)
         
-        # Compute raw losses
+        # Compute raw losses (用于帕累托最优)
         raw_losses = compute_raw_losses(pred, target, n_states=model.n_states)
+        # 合并到 loss_dict
+        loss_dict.update(raw_losses)
 
-        # Accumulate losses
-        total_loss += loss_dict['loss']
-        for key in loss_components:
-            loss_components[key] += loss_dict[key]
-        for key in total_raw_losses:
-            total_raw_losses[key] += raw_losses[key]
-        total_r_sign_acc += loss_dict['R_sign_acc']
+        # Accumulate losses (动态处理所有键)
+        for key, value in loss_dict.items():
+            if key not in accumulated_losses:
+                accumulated_losses[key] = 0.0
+            accumulated_losses[key] += value
         num_batches += 1
 
     # Compute averages
-    avg_loss = total_loss / num_batches
-    for key in loss_components:
-        loss_components[key] /= num_batches
-    for key in total_raw_losses:
-        total_raw_losses[key] /= num_batches
-    avg_r_sign_acc = total_r_sign_acc / num_batches
-    
-    loss_components['loss'] = avg_loss
-    loss_components['R_sign_acc'] = avg_r_sign_acc
-    loss_components.update(total_raw_losses)
+    avg_losses = {key: value / num_batches for key, value in accumulated_losses.items()}
 
-    return loss_components
+    return avg_losses
 
 
 @torch.no_grad()
@@ -273,110 +254,250 @@ def test(model, loader, criterion, device, logger):
     return validate(model, loader, criterion, device, logger)
 
 
+def is_pareto_dominated(candidate, existing):
+    """
+    检查 candidate 是否被 existing 支配。
+    注意：R_sign_acc 是越大越好，而其他损失是越小越好
+    
+    Args:
+        candidate: dict with keys 'raw_loss_E', 'raw_loss_mu', 'raw_loss_m', 'R_sign_acc'
+        existing: dict with same keys
+    
+    Returns:
+        bool: True if candidate is dominated by existing
+    """
+    # 损失目标 (越小越好)
+    loss_objectives = ['raw_loss_E', 'raw_loss_mu', 'raw_loss_m']
+    # 准确率目标 (越大越好)
+    acc_objectives = ['R_sign_acc']
+    
+    # existing 在所有损失目标上都不比 candidate 差 (existing <= candidate)
+    loss_not_worse = all(existing[obj] <= candidate[obj] for obj in loss_objectives)
+    # existing 在所有准确率目标上都不比 candidate 差 (existing >= candidate)
+    acc_not_worse = all(existing[obj] >= candidate[obj] for obj in acc_objectives)
+    
+    # existing 至少在一个目标上更好
+    loss_strictly_better = any(existing[obj] < candidate[obj] for obj in loss_objectives)
+    acc_strictly_better = any(existing[obj] > candidate[obj] for obj in acc_objectives)
+    
+    not_worse = loss_not_worse and acc_not_worse
+    strictly_better = loss_strictly_better or acc_strictly_better
+    
+    return not_worse and strictly_better
+
+
+def update_pareto_frontier(pareto_checkpoints, candidate_loss, candidate_info, max_checkpoints=10):
+    """
+    更新帕累托前沿，添加新的检查点如果被接受。
+    注意：R_sign_acc 越大越好，而损失越小越好
+    
+    Args:
+        pareto_checkpoints: list of (loss_dict, info_dict) tuples
+        candidate_loss: dict with raw losses and R_sign_acc
+        candidate_info: dict with checkpoint info (epoch, paths, etc.)
+        max_checkpoints: maximum number of checkpoints to keep
+    
+    Returns:
+        updated list of pareto checkpoints, list of removed checkpoint paths to delete
+    """
+    # 检查 candidate 是否被任何现有检查点支配
+    for existing_loss, _ in pareto_checkpoints:
+        if is_pareto_dominated(candidate_loss, existing_loss):
+            # Candidate 被支配，不添加
+            return pareto_checkpoints, []
+    
+    # Candidate 不被支配，添加到前沿
+    new_pareto = []
+    removed_paths = []
+    
+    for existing_loss, existing_info in pareto_checkpoints:
+        if not is_pareto_dominated(existing_loss, candidate_loss):
+            # Existing 不被 candidate 支配，保留
+            new_pareto.append((existing_loss, existing_info))
+        else:
+            # Existing 被 candidate 支配，标记删除
+            if 'checkpoint_path' in existing_info:
+                removed_paths.append(existing_info['checkpoint_path'])
+    
+    # 添加新的检查点
+    new_pareto.append((candidate_loss, candidate_info))
+    
+    # 如果检查点太多，保留最好的 (基于综合评分：损失越低越好，sign_acc越高越好)
+    if len(new_pareto) > max_checkpoints:
+        # 计算每个检查点的综合评分
+        def pareto_score(item):
+            loss_dict = item[0]
+            # 损失的加权和 (越小越好)
+            loss_sum = (loss_dict.get('raw_loss_E', 0) + 
+                       loss_dict.get('raw_loss_mu', 0) + 
+                       loss_dict.get('raw_loss_m', 0))
+            # sign_acc (越大越好，用 1 - acc 使其成为越小越好)
+            sign_penalty = 1.0 - loss_dict.get('R_sign_acc', 0)
+            return loss_sum + sign_penalty * 10  # sign_acc 权重为10
+        
+        new_pareto.sort(key=pareto_score)
+        # 标记要删除的多余检查点
+        for i in range(max_checkpoints, len(new_pareto)):
+            _, info = new_pareto[i]
+            if 'checkpoint_path' in info:
+                removed_paths.append(info['checkpoint_path'])
+        new_pareto = new_pareto[:max_checkpoints]
+    
+    return new_pareto, removed_paths
+
+
+def save_pareto_checkpoint(model, optimizer, scheduler, epoch, val_losses, checkpoint_dir, pareto_checkpoints, logger, max_checkpoints=10):
+    """
+    基于帕累托最优策略保存检查点。
+    使用 E, mu, m 的原始损失和 R 的 sign accuracy 作为帕累托目标。
+    
+    Args:
+        val_losses: dict containing validation losses including raw losses and R_sign_acc
+        pareto_checkpoints: list to maintain pareto frontier
+    
+    Returns:
+        updated pareto_checkpoints list
+    """
+    # 准备 candidate 信息 (使用 E, mu, m 的损失和 R 的 sign accuracy)
+    candidate_loss = {
+        'raw_loss_E': val_losses.get('raw_loss_E', float('inf')),
+        'raw_loss_mu': val_losses.get('raw_loss_mu', float('inf')),
+        'raw_loss_m': val_losses.get('raw_loss_m', float('inf')),
+        'R_sign_acc': val_losses.get('R_sign_acc', 0.0),  # 使用 sign accuracy 而不是 raw_loss_R
+    }
+    
+    checkpoint_filename = f'pareto_epoch_{epoch}.pt'
+    checkpoint_path = os.path.join(checkpoint_dir, checkpoint_filename)
+    
+    candidate_info = {
+        'epoch': epoch,
+        'checkpoint_path': checkpoint_path,
+        'total_normalized_loss': val_losses.get('loss', float('inf')),
+    }
+    
+    # 先保存检查点文件
+    torch.save({
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'val_loss': val_losses.get('loss', float('inf')),
+        'pareto_metrics': candidate_loss,  # 保存帕累托指标
+        'config': None,  # Will be filled by caller
+    }, checkpoint_path)
+    
+    # 更新帕累托前沿
+    pareto_checkpoints, removed_paths = update_pareto_frontier(
+        pareto_checkpoints, candidate_loss, candidate_info, max_checkpoints
+    )
+    
+    # 删除被支配的检查点文件
+    for path in removed_paths:
+        if os.path.exists(path):
+            os.remove(path)
+            logger.info(f"  Removed dominated checkpoint: {os.path.basename(path)}")
+    
+    # 记录帕累托前沿状态
+    logger.info(f"  Pareto frontier: {len(pareto_checkpoints)} checkpoints")
+    for i, (loss_dict, info) in enumerate(pareto_checkpoints):
+        logger.info(f"    [{i+1}] Epoch {info['epoch']}: "
+                   f"E={loss_dict['raw_loss_E']:.4f}, "
+                   f"mu={loss_dict['raw_loss_mu']:.4f}, "
+                   f"m={loss_dict['raw_loss_m']:.4f}, "
+                   f"R_sign_acc={loss_dict['R_sign_acc']:.4f}")
+    
+    return pareto_checkpoints
+
+
 def plot_loss_curves(train_losses, val_losses, save_path):
-    """Plot and save training/validation loss curves."""
-    fig = plt.figure(figsize=(20, 12))
+    """Plot and save training/validation loss curves dynamically based on loss_dict keys."""
+    logger = logging.getLogger(__name__)
     
-    # Main plot: total loss
-    plt.subplot(3, 3, 1)
-    epochs = range(1, len(train_losses['total']) + 1)
-    plt.plot(epochs, train_losses['total'], 'b-', label='Train', linewidth=2)
-    plt.plot(epochs, val_losses['total'], 'r-', label='Validation', linewidth=2)
-    plt.xlabel('Epoch')
-    plt.ylabel('Normalized Loss')
-    plt.title('Training and Validation: Total Normalized Loss')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.yscale('log')
-
-    # Subplot: Energy loss (normalized)
-    plt.subplot(3, 3, 2)
-    plt.plot(epochs, train_losses['E'], 'b-', label='Train', linewidth=2)
-    plt.plot(epochs, val_losses['E'], 'r-', label='Validation', linewidth=2)
-    plt.xlabel('Epoch')
-    plt.ylabel('Normalized Loss')
-    plt.title('Excitation Energy Loss (Normalized)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.yscale('log')
-
-    # Subplot: Electric dipole loss (normalized)
-    plt.subplot(3, 3, 3)
-    plt.plot(epochs, train_losses['mu'], 'b-', label='Train', linewidth=2)
-    plt.plot(epochs, val_losses['mu'], 'r-', label='Validation', linewidth=2)
-    plt.xlabel('Epoch')
-    plt.ylabel('Normalized Loss')
-    plt.title('Electric Dipole Loss (Normalized)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.yscale('log')
-
-    # Subplot: Magnetic dipole loss (normalized)
-    plt.subplot(3, 3, 4)
-    plt.plot(epochs, train_losses['m'], 'b-', label='Train', linewidth=2)
-    plt.plot(epochs, val_losses['m'], 'r-', label='Validation', linewidth=2)
-    plt.xlabel('Epoch')
-    plt.ylabel('Normalized Loss')
-    plt.title('Magnetic Dipole Loss (Normalized)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.yscale('log')
-
-    # Subplot: Rotatory strength loss (normalized)
-    plt.subplot(3, 3, 5)
-    plt.plot(epochs, train_losses['R'], 'b-', label='Train', linewidth=2)
-    plt.plot(epochs, val_losses['R'], 'r-', label='Validation', linewidth=2)
-    plt.xlabel('Epoch')
-    plt.ylabel('Normalized Loss')
-    plt.title('Rotatory Strength Loss (Normalized)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.yscale('log')
+    # 获取所有可用的 loss keys（排除空列表的）
+    all_keys = set()
+    for key, values in train_losses.items():
+        if values and len(values) > 0:
+            all_keys.add(key)
+    for key, values in val_losses.items():
+        if values and len(values) > 0:
+            all_keys.add(key)
     
-    # Raw losses
-    plt.subplot(3, 3, 6)
-    plt.plot(epochs, train_losses['E_raw'], 'b-', label='Train (Raw)', linewidth=2)
-    plt.plot(epochs, val_losses['E_raw'], 'r-', label='Val (Raw)', linewidth=2)
-    plt.xlabel('Epoch')
-    plt.ylabel('MSE Loss')
-    plt.title('Excitation Energy Loss (Raw MSE)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.yscale('log')
+    if not all_keys:
+        logger.warning("No loss data to plot yet")
+        return
     
-    plt.subplot(3, 3, 7)
-    plt.plot(epochs, train_losses['mu_raw'], 'b-', label='Train (Raw)', linewidth=2)
-    plt.plot(epochs, val_losses['mu_raw'], 'r-', label='Val (Raw)', linewidth=2)
-    plt.xlabel('Epoch')
-    plt.ylabel('MSE Loss')
-    plt.title('Electric Dipole Loss (Raw MSE)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.yscale('log')
+    # 排序 keys：total loss 在前，然后是 raw losses，然后是 normalized losses，最后是 metrics
+    priority_order = {
+        'loss': 0,  # Total normalized loss
+        'raw_loss_E': 1,
+        'raw_loss_mu': 2,
+        'raw_loss_m': 3,
+        'raw_loss_R': 4,
+        'norm_E': 5,
+        'norm_mu': 6,
+        'norm_m': 7,
+        'norm_mu_m': 8,
+        'norm_R': 9,
+        'R_sign_acc': 10,
+    }
+    sorted_keys = sorted(all_keys, key=lambda k: priority_order.get(k, 99))
     
-    plt.subplot(3, 3, 8)
-    plt.plot(epochs, train_losses['m_raw'], 'b-', label='Train (Raw)', linewidth=2)
-    plt.plot(epochs, val_losses['m_raw'], 'r-', label='Val (Raw)', linewidth=2)
-    plt.xlabel('Epoch')
-    plt.ylabel('MSE Loss')
-    plt.title('Magnetic Dipole Loss (Raw MSE)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.yscale('log')
+    # 获取 epoch 数
+    epochs = range(1, len(train_losses.get('loss', train_losses.get(sorted_keys[0], []))) + 1)
+    if len(epochs) == 0:
+        logger.warning("No loss data to plot yet")
+        return
     
-    plt.subplot(3, 3, 9)
-    plt.plot(epochs, train_losses['R_raw'], 'b-', label='Train (Raw)', linewidth=2)
-    plt.plot(epochs, val_losses['R_raw'], 'r-', label='Val (Raw)', linewidth=2)
-    plt.xlabel('Epoch')
-    plt.ylabel('MSE Loss')
-    plt.title('Rotatory Strength Loss (Raw MSE)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.yscale('log')
-
+    # 根据 key 数量动态计算 subplot 布局
+    n_keys = len(sorted_keys)
+    n_cols = 3
+    n_rows = (n_keys + n_cols - 1) // n_cols  # 向上取整
+    n_rows = max(n_rows, 2)  # 至少 2 行
+    
+    fig = plt.figure(figsize=(6 * n_cols, 4 * n_rows))
+    
+    # 定义每个 key 的显示配置
+    key_configs = {
+        'loss': {'title': 'Total Normalized Loss', 'ylabel': 'Normalized Loss', 'yscale': 'log'},
+        'raw_loss_E': {'title': 'Excitation Energy Loss (Raw)', 'ylabel': 'MSE Loss', 'yscale': 'log'},
+        'raw_loss_mu': {'title': 'Electric Dipole Loss (Raw)', 'ylabel': 'MSE Loss', 'yscale': 'log'},
+        'raw_loss_m': {'title': 'Magnetic Dipole Loss (Raw)', 'ylabel': 'MSE Loss', 'yscale': 'log'},
+        'raw_loss_R': {'title': 'Rotatory Strength Loss (Raw L1)', 'ylabel': 'L1 Loss', 'yscale': 'log'},
+        'norm_E': {'title': 'Energy Loss (Normalized)', 'ylabel': 'Normalized Loss', 'yscale': 'log'},
+        'norm_mu': {'title': 'Electric Dipole Loss (Normalized)', 'ylabel': 'Normalized Loss', 'yscale': 'log'},
+        'norm_m': {'title': 'Magnetic Dipole Loss (Normalized)', 'ylabel': 'Normalized Loss', 'yscale': 'log'},
+        'norm_mu_m': {'title': 'Mu-M Joint Loss (Normalized)', 'ylabel': 'Normalized Loss', 'yscale': 'log'},
+        'norm_R': {'title': 'Rotatory Strength Loss (Normalized)', 'ylabel': 'Normalized Loss', 'yscale': 'log'},
+        'R_sign_acc': {'title': 'R Sign Prediction Accuracy', 'ylabel': 'Accuracy', 'ylim': [0, 1]},
+    }
+    
+    for idx, key in enumerate(sorted_keys, 1):
+        plt.subplot(n_rows, n_cols, idx)
+        
+        train_vals = train_losses.get(key, [])
+        val_vals = val_losses.get(key, [])
+        
+        if train_vals:
+            plt.plot(epochs[:len(train_vals)], train_vals, 'b-', label='Train', linewidth=2)
+        if val_vals:
+            plt.plot(epochs[:len(val_vals)], val_vals, 'r-', label='Validation', linewidth=2)
+        
+        config = key_configs.get(key, {'title': key.replace('_', ' ').title(), 'ylabel': 'Value'})
+        plt.xlabel('Epoch')
+        plt.ylabel(config['ylabel'])
+        plt.title(config['title'])
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        if 'yscale' in config:
+            plt.yscale(config['yscale'])
+        if 'ylim' in config:
+            plt.ylim(config['ylim'])
+    
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
+    logger.info(f"Saved loss curves to {save_path}")
 
 
 def generate_spectrum(E_pred, R_pred_au, wavelength_grid, sigma=0.4):
@@ -535,7 +656,7 @@ def main():
     # Configuration - 完全照搬 03_train.py
     config = {
         'data_dir': 'data/processed_with_enantiomers',
-        'checkpoint_dir': 'checkpoints',
+        'checkpoint_dir': 'checkpoints_new',
         'spectrum_dir': 'test_spectra',  # 专门存放光谱图的文件夹
         'batch_size': 64,
         'num_epochs': 1000,
@@ -554,7 +675,7 @@ def main():
         # Loss Weights（归一化后的相对权重）
         'lambda_E': 1.0,
         'lambda_mu': 1.0,
-        'lambda_m': 0.0,
+        'lambda_m': 1.0,
         'lambda_R': 1.0,
         'lambda_R_sign': 0.0,
         
@@ -614,126 +735,116 @@ def main():
     scheduler = CosineAnnealingLR(
         optimizer,
         eta_min=1e-5,
-        T_max=config['num_epochs']/5
+        T_max=config['num_epochs']/25
     )
 
-    # Training tracking
-    best_val_loss = float('inf')
-    train_losses = {'total': [], 'E': [], 'mu': [], 'm': [], 'R': [], 'R_sign_acc': [],
-                    'E_raw': [], 'mu_raw': [], 'm_raw': [], 'R_raw': []}
-    val_losses = {'total': [], 'E': [], 'mu': [], 'm': [], 'R': [], 'R_sign_acc': [],
-                  'E_raw': [], 'mu_raw': [], 'm_raw': [], 'R_raw': []}
+    # Training tracking - 使用动态字典存储所有 losses
+    train_losses_history = {}  # 存储所有训练 loss
+    val_losses_history = {}    # 存储所有验证 loss
+    pareto_checkpoints = []    # 帕累托前沿检查点列表
 
     # Training loop
     logger.info("\nStarting training...")
     logger.info("=" * 80)
 
-    # for epoch in range(1, config['num_epochs'] + 1):
-    #     logger.info(f"\nEpoch {epoch}/{config['num_epochs']}")
-    #     logger.info("-" * 80)
+    for epoch in range(1, config['num_epochs'] + 1):
+        logger.info(f"\nEpoch {epoch}/{config['num_epochs']}")
+        logger.info("-" * 80)
 
-    #     # Train
-    #     train_components = train_epoch(
-    #         model, train_loader, criterion, optimizer, device, logger
-    #     )
+        # Train
+        train_components = train_epoch(
+            model, train_loader, criterion, optimizer, device, logger
+        )
 
-    #     # Validate
-    #     logger.info("  Running validation...")
-    #     val_components = validate(
-    #         model, val_loader, criterion, device, logger
-    #     )
+        # Validate
+        logger.info("  Running validation...")
+        val_components = validate(
+            model, val_loader, criterion, device, logger
+        )
         
-    #     # Update learning rate
-    #     scheduler.step()
-    #     current_lr = scheduler.get_last_lr()[0]
+        # Update learning rate
+        scheduler.step()
+        current_lr = scheduler.get_last_lr()[0]
 
-    #     # Log epoch summary
-    #     logger.info("-" * 80)
-    #     logger.info(
-    #         f"Epoch {epoch} Summary - "
-    #         f"Train Loss: {train_components['loss']:.4f}, "
-    #         f"Val Loss: {val_components['loss']:.4f}, "
-    #         f"LR: {current_lr:.6f}"
-    #     )
-    #     logger.info(
-    #         f"  Raw MSE - Train: E={train_components['loss_E_raw']:.4f}, "
-    #         f"mu={train_components['loss_mu_raw']:.4f}, "
-    #         f"m={train_components['loss_m_raw']:.4f}, "
-    #         f"R={train_components['loss_R_raw']:.4f}"
-    #     )
-    #     logger.info(
-    #         f"  Raw MSE - Val:   E={val_components['loss_E_raw']:.4f}, "
-    #         f"mu={val_components['loss_mu_raw']:.4f}, "
-    #         f"m={val_components['loss_m_raw']:.4f}, "
-    #         f"R={val_components['loss_R_raw']:.4f}"
-    #     )
-    #     logger.info(
-    #         f"  R Sign Acc: Train={train_components['R_sign_acc']:.4f}, "
-    #         f"Val={val_components['R_sign_acc']:.4f}"
-    #     )
+        # Log epoch summary (动态格式)
+        logger.info("-" * 80)
+        logger.info(
+            f"Epoch {epoch} Summary - "
+            f"Train Loss: {train_components.get('loss', 0):.4f}, "
+            f"Val Loss: {val_components.get('loss', 0):.4f}, "
+            f"LR: {current_lr:.6f}"
+        )
+        
+        # 动态构建 Raw Loss 日志
+        raw_loss_keys = ['raw_loss_E', 'raw_loss_mu', 'raw_loss_m', 'raw_loss_R', 'raw_loss_mu_m_joint']
+        raw_train_parts = []
+        raw_val_parts = []
+        for key in raw_loss_keys:
+            if key in train_components:
+                loss_name = key.replace('raw_loss_', '')
+                raw_train_parts.append(f"{loss_name}={train_components[key]:.4f}")
+                raw_val_parts.append(f"{loss_name}={val_components[key]:.4f}")
+        
+        if raw_train_parts:
+            logger.info(f"  Raw - Train: {', '.join(raw_train_parts)}")
+            logger.info(f"  Raw - Val:   {', '.join(raw_val_parts)}")
+        
+        # R Sign Accuracy
+        if 'R_sign_acc' in train_components:
+            logger.info(
+                f"  R Sign Acc: Train={train_components['R_sign_acc']:.4f}, "
+                f"Val={val_components['R_sign_acc']:.4f}"
+            )
 
-    #     # Store losses for plotting
-    #     for key in train_losses:
-    #         if key in train_components:
-    #             train_losses[key].append(train_components[key])
-    #     for key in val_losses:
-    #         if key in val_components:
-    #             val_losses[key].append(val_components[key])
+        # Store losses for plotting (动态存储)
+        for key, value in train_components.items():
+            if key not in train_losses_history:
+                train_losses_history[key] = []
+            train_losses_history[key].append(value)
+        
+        for key, value in val_components.items():
+            if key not in val_losses_history:
+                val_losses_history[key] = []
+            val_losses_history[key].append(value)
 
-    #     # Save best model
-    #     if val_components['loss'] < best_val_loss:
-    #         best_val_loss = val_components['loss']
-    #         checkpoint_path = os.path.join(config['checkpoint_dir'], 'best_model.pt')
-    #         torch.save({
-    #             'epoch': epoch,
-    #             'model_state_dict': model.state_dict(),
-    #             'optimizer_state_dict': optimizer.state_dict(),
-    #             'scheduler_state_dict': scheduler.state_dict(),
-    #             'val_loss': val_components['loss'],
-    #             'config': config
-    #         }, checkpoint_path)
-    #         logger.info(f"  Saved best model (val_loss: {val_components['loss']:.4f})")
+        # Save checkpoints using Pareto optimal strategy (基于未归一化的 raw losses)
+        pareto_checkpoints = save_pareto_checkpoint(
+            model, optimizer, scheduler, epoch, val_components,
+            config['checkpoint_dir'], pareto_checkpoints, logger,
+            max_checkpoints=10
+        )
 
-    #     # Save checkpoint every 10 epochs
-    #     if epoch % 100 == 0:
-    #         checkpoint_path = os.path.join(
-    #             config['checkpoint_dir'],
-    #             f'checkpoint_epoch_{epoch}.pt'
-    #         )
-    #         torch.save({
-    #             'epoch': epoch,
-    #             'model_state_dict': model.state_dict(),
-    #             'optimizer_state_dict': optimizer.state_dict(),
-    #             'scheduler_state_dict': scheduler.state_dict(),
-    #             'val_loss': val_components['loss'],
-    #             'config': config
-    #         }, checkpoint_path)
-    #         logger.info(f"  Saved checkpoint at epoch {epoch}")
-
-    #     # Plot loss curves
-    #     if epoch % 5 == 0 or epoch == 1:
-    #         plot_path = os.path.join(config['checkpoint_dir'], 'loss_curves.png')
-    #         plot_loss_curves(train_losses, val_losses, plot_path)
-    #         logger.info(f"  Updated loss curves plot")
+        # Plot loss curves
+        if epoch % 5 == 0 or epoch == 1:
+            plot_path = os.path.join(config['checkpoint_dir'], 'loss_curves.png')
+            plot_loss_curves(train_losses_history, val_losses_history, plot_path)
+            logger.info(f"  Updated loss curves plot")
     
     # 加载训练好的模型进行测试
-    last_checkpoint = torch.load('checkpoints/checkpoint_epoch_1000.pt')
-    model.load_state_dict(last_checkpoint['model_state_dict'])
-    logger.info(f"Loaded checkpoint from epoch {last_checkpoint['epoch']}")
+    # last_checkpoint = torch.load('checkpoints/checkpoint_epoch_1000.pt')
+    # model.load_state_dict(last_checkpoint['model_state_dict'])
+    # logger.info(f"Loaded checkpoint from epoch {last_checkpoint['epoch']}")
     
     # Final test evaluation
     logger.info("\n" + "=" * 80)
     logger.info("Final Test Evaluation")
     logger.info("=" * 80)
     test_components = test(model, test_loader, criterion, device, logger)
-    logger.info(
-        f"Test Loss: {test_components['loss']:.4f} "
-        f"(E: {test_components['loss_E']:.4f}, "
-        f"mu: {test_components['loss_mu']:.4f}, "
-        f"m: {test_components['loss_m']:.4f}, "
-        f"R: {test_components['loss_R']:.4f}) "
-        f"R_sign_acc: {test_components['R_sign_acc']:.4f}"
-    )
+    
+    # 动态构建测试日志
+    test_log_parts = []
+    for key in ['loss_E', 'loss_mu', 'loss_m', 'loss_R']:
+        if key in test_components:
+            test_log_parts.append(f"{key.replace('loss_', '')}: {test_components[key]:.4f}")
+    
+    if test_log_parts:
+        logger.info(
+            f"Test Loss: {test_components.get('loss', 0):.4f} "
+            f"({', '.join(test_log_parts)}) "
+            f"R_sign_acc: {test_components.get('R_sign_acc', 0):.4f}"
+        )
+    else:
+        logger.info(f"Test Loss: {test_components.get('loss', 0):.4f}")
 
     # Generate test spectra
     logger.info("\n" + "=" * 80)
@@ -747,15 +858,33 @@ def main():
     logger.info("\n" + "=" * 80)
     logger.info("Training completed!")
     logger.info("=" * 80)
-    logger.info(f"Best validation loss: {best_val_loss:.4f}")
-    logger.info(f"Final test loss: {test_components['loss']:.4f}")
-    logger.info(f"Best model saved to: {os.path.join(config['checkpoint_dir'], 'best_model.pt')}")
+    
+    # 获取最佳检查点信息 (基于综合评分)
+    if pareto_checkpoints:
+        def pareto_score(item):
+            loss_dict = item[0]
+            loss_sum = (loss_dict.get('raw_loss_E', 0) + 
+                       loss_dict.get('raw_loss_mu', 0) + 
+                       loss_dict.get('raw_loss_m', 0))
+            sign_penalty = 1.0 - loss_dict.get('R_sign_acc', 0)
+            return loss_sum + sign_penalty * 10
+        
+        best_pareto = min(pareto_checkpoints, key=pareto_score)
+        logger.info(f"Best Pareto checkpoint: Epoch {best_pareto[1]['epoch']} "
+                   f"(val_loss: {best_pareto[1]['total_normalized_loss']:.4f})")
+        logger.info(f"  Metrics: E={best_pareto[0]['raw_loss_E']:.4f}, "
+                   f"mu={best_pareto[0]['raw_loss_mu']:.4f}, "
+                   f"m={best_pareto[0]['raw_loss_m']:.4f}, "
+                   f"R_sign_acc={best_pareto[0]['R_sign_acc']:.4f}")
+    
+    logger.info(f"Final test loss: {test_components.get('loss', 0):.4f}")
+    logger.info(f"Pareto checkpoints saved to: {config['checkpoint_dir']}")
     logger.info(f"Test spectra saved to: {spectrum_dir}")
     logger.info("=" * 80)
 
     # Final plot
     plot_path = os.path.join(config['checkpoint_dir'], 'loss_curves_final.png')
-    plot_loss_curves(train_losses, val_losses, plot_path)
+    plot_loss_curves(train_losses_history, val_losses_history, plot_path)
 
 
 if __name__ == '__main__':
