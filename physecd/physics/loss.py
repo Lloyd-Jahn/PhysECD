@@ -82,20 +82,20 @@ class PhysECDLoss(nn.Module):
         y_E = target['y_E'].reshape(batch_size, n_states)
         loss_E = F.mse_loss(pred['E_pred'], y_E)
 
-        # 2. 电跃迁偶极 (Velocity Dipole) Loss - Phase-Invariant
+        # 2. 速度电偶极矩 Loss - 保留两种相位的逐激发态损失（用于联合归一化）
         y_mu_vel = target['y_mu_vel'].reshape(batch_size, n_states, 3)
         mu_vel_diff = pred['mu_total_vel'] - y_mu_vel
-        mu_vel_sum = pred['mu_total_vel'] + y_mu_vel
+        mu_vel_sum  = pred['mu_total_vel'] + y_mu_vel
         loss_mu_vel_phase1 = (mu_vel_diff ** 2).sum(dim=-1)  # [B, n_states]
-        loss_mu_vel_phase2 = (mu_vel_sum ** 2).sum(dim=-1)   # [B, n_states]
+        loss_mu_vel_phase2 = (mu_vel_sum  ** 2).sum(dim=-1)  # [B, n_states]
         loss_mu_vel = torch.min(loss_mu_vel_phase1, loss_mu_vel_phase2).mean()
 
-        # 3. 磁跃迁偶极 Loss - Phase-Invariant
+        # 3. 磁偶极矩 Loss - 保留两种相位的逐激发态损失（用于联合归一化）
         y_m = target['y_m'].reshape(batch_size, n_states, 3)
         m_diff = pred['m_total'] - y_m
-        m_sum = pred['m_total'] + y_m
+        m_sum  = pred['m_total'] + y_m
         loss_m_phase1 = (m_diff ** 2).sum(dim=-1)  # [B, n_states]
-        loss_m_phase2 = (m_sum ** 2).sum(dim=-1)   # [B, n_states]
+        loss_m_phase2 = (m_sum  ** 2).sum(dim=-1)  # [B, n_states]
         loss_m = torch.min(loss_m_phase1, loss_m_phase2).mean()
 
         # ====================================================================
@@ -112,16 +112,16 @@ class PhysECDLoss(nn.Module):
         R_sign_logits = pred['R_pred']  # 直接用 R_pred 值作 logits
         loss_R_sign = F.binary_cross_entropy_with_logits(R_sign_logits, y_R_sign)
 
-        # R 的总 loss = L1 + 分类
+        # R 的总 loss = L1（分类 loss 仅用于辅助监控）
         loss_R = loss_R_l1
 
-        # 计算符号预测准确率
+        # 计算符号预测准确率（监控指标，不参与反向传播）
         with torch.no_grad():
             R_sign_pred = (pred['R_pred'] > 0).float()
             r_sign_correct = (R_sign_pred == y_R_sign).float().mean()
         # ====================================================================
 
-        # 损失归一化：用 EMA 跟踪每个分量的量级，归一化后再加权
+        # 损失归一化：用 EMA 跟踪每个分量的量级
         with torch.no_grad():
             if not self.initialized:
                 self.ema_E.copy_(loss_E.detach())
@@ -136,30 +136,42 @@ class PhysECDLoss(nn.Module):
                 self.ema_m.mul_(d).add_(loss_m.detach(), alpha=1 - d)
                 self.ema_R.mul_(d).add_(loss_R.detach(), alpha=1 - d)
 
-        # 用 EMA 值做归一化（加 eps 防除零）
+        # 联合 μ-m 相位归一化：
+        # μ_vel 和 m 共享同一量子相位，因此必须同时翻转。
+        # 对两种相位分别将归一化后的 μ 损失和 m 损失相加，再取最小值，
+        # 保证两者一致地选择同一相位（而非各自独立选择）。
         eps = 1e-8
+        norm_mu_vel_phase1 = loss_mu_vel_phase1.mean() / (self.ema_mu_vel + eps)
+        norm_mu_vel_phase2 = loss_mu_vel_phase2.mean() / (self.ema_mu_vel + eps)
+        norm_m_phase1      = loss_m_phase1.mean()      / (self.ema_m + eps)
+        norm_m_phase2      = loss_m_phase2.mean()      / (self.ema_m + eps)
+        norm_mu_m_phase1   = norm_mu_vel_phase1 + norm_m_phase1  # 同相位
+        norm_mu_m_phase2   = norm_mu_vel_phase2 + norm_m_phase2  # 反相位
+        norm_mu_m = torch.min(norm_mu_m_phase1, norm_mu_m_phase2)
+
         norm_E = loss_E / (self.ema_E + eps)
-        norm_mu_vel = loss_mu_vel / (self.ema_mu_vel + eps)
-        norm_m = loss_m / (self.ema_m + eps)
         norm_R = loss_R / (self.ema_R + eps)
 
-        # Weighted total loss
+        # 加权总 loss：lambda_mu_vel 对联合归一化的 μ+m 损失加权
+        # （lambda_m 已隐含在 norm_mu_m 的联合约束中，不再单独加权）
         total_loss = (
-            self.lambda_E * norm_E +
-            self.lambda_mu_vel * norm_mu_vel +
-            self.lambda_m * norm_m +
-            self.lambda_R * norm_R
+            self.lambda_E      * norm_E   +
+            self.lambda_mu_vel * norm_mu_m +
+            self.lambda_R      * norm_R
         )
 
         loss_dict = {
-            'loss': total_loss.item(),
-            'loss_E': loss_E.item(),
-            'loss_mu_vel': loss_mu_vel.item(),
-            'loss_m': loss_m.item(),
-            'loss_R': loss_R.item(),
-            'loss_R_l1': loss_R_l1.item(),
-            'loss_R_sign': loss_R_sign.item(),
-            'R_sign_acc': r_sign_correct.item()
+            'loss':         total_loss.item(),
+            'loss_E':       loss_E.item(),
+            'loss_mu_vel':  loss_mu_vel.item(),   # 各自独立取 min 后的值（用于监控/帕累托）
+            'loss_m':       loss_m.item(),         # 各自独立取 min 后的值（用于监控/帕累托）
+            'loss_R':       loss_R.item(),
+            'loss_R_l1':    loss_R_l1.item(),
+            'loss_R_sign':  loss_R_sign.item(),
+            'R_sign_acc':   r_sign_correct.item(),
+            'norm_E':       norm_E.item(),         # 归一化后各分量（用于绘图）
+            'norm_mu_m':    norm_mu_m.item(),
+            'norm_R':       norm_R.item(),
         }
 
         return total_loss, loss_dict

@@ -45,7 +45,7 @@ def check_formula_consistency(data_path):
         y_m = data.y_m             # [20, 3]
         y_R_true = data.y_R        # [20]
 
-        # 核心：严格套用 aggregation.py 中的公式
+        # 严格套用 aggregation.py 中的公式
         # R_pred = 6414.135151 * (μ_vel · m) / E
         mu_vel_dot_m = torch.sum(y_mu_vel * y_m, dim=-1)
         
@@ -66,8 +66,9 @@ def check_formula_consistency(data_path):
 
     # 计算统计指标
     mae = torch.mean(errors_tensor).item()
+    mse = torch.mean(errors_tensor ** 2).item()
     max_error = torch.max(errors_tensor).item()
-    
+
     # 计算皮尔逊相关系数 (Pearson Correlation Coefficient)
     vx = R_calc_tensor - torch.mean(R_calc_tensor)
     vy = R_true_tensor - torch.mean(R_true_tensor)
@@ -76,6 +77,7 @@ def check_formula_consistency(data_path):
     print("\n【全局统计结果】")
     print(f"样本总数 (Excited States): {len(R_calc_tensor)}")
     print(f"平均绝对误差 (MAE): {mae:.4f}")
+    print(f"均方误差     (MSE): {mse:.4f}")
     print(f"最大绝对误差 (Max Error): {max_error:.4f}")
     print(f"皮尔逊相关系数 (R²): {correlation.item():.6f} (越接近1说明线性关系越完美)")
 

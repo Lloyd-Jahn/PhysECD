@@ -1,12 +1,18 @@
 """
-测试集评估脚本
+评估脚本（支持 train / val / test 三个分割）
 
-加载训练好的模型 checkpoint，在完整测试集上计算各项指标，
-并批量生成测试集分子的预测光谱 vs 真实光谱对比图。
+加载训练好的模型 checkpoint，在指定数据分割上计算各项指标，
+并批量生成预测光谱 vs 真实光谱对比图。
 
-运行指令：
-cd 到 PhysECD 项目根目录下，执行：
-python scripts/04_evaluate.py --checkpoint checkpoints/best_model.pt --num_spectra 100
+运行指令（从项目根目录）：
+  # 评估测试集（默认）
+  python scripts/04_evaluate.py
+
+  # 评估训练集（用于确认过拟合程度）
+  python scripts/04_evaluate.py --split train
+
+  # 评估验证集，指定 checkpoint
+  python scripts/04_evaluate.py --split val --checkpoint checkpoints/checkpoint_epoch_1000.pt
 """
 
 import os
@@ -32,7 +38,16 @@ from physecd.physics import PhysECDLoss
 
 def parse_args():
     """解析命令行参数。"""
-    parser = argparse.ArgumentParser(description='Evaluate PhysECD model on test set')
+    parser = argparse.ArgumentParser(
+        description='Evaluate PhysECD model on train / val / test split'
+    )
+    parser.add_argument(
+        '--split',
+        type=str,
+        default='test',
+        choices=['train', 'val', 'test'],
+        help='要评估的数据分割：train / val / test（默认：test）'
+    )
     parser.add_argument(
         '--checkpoint',
         type=str,
@@ -49,7 +64,7 @@ def parse_args():
         '--output_dir',
         type=str,
         default=None,
-        help='光谱图输出目录（默认：checkpoint 同目录下的 test_spectra/）'
+        help='输出目录（默认：checkpoints/{split}_evaluation/）'
     )
     parser.add_argument(
         '--num_spectra',
@@ -137,10 +152,10 @@ def compute_raw_losses(pred, target, n_states):
     loss_R_raw = F.mse_loss(pred['R_pred'], y_R)
 
     return {
-        'loss_E_raw':  loss_E_raw.item(),
+        'loss_E_raw':      loss_E_raw.item(),
         'loss_mu_vel_raw': loss_mu_vel_raw.item(),
-        'loss_m_raw':  loss_m_raw.item(),
-        'loss_R_raw':  loss_R_raw.item(),
+        'loss_m_raw':      loss_m_raw.item(),
+        'loss_R_raw':      loss_R_raw.item(),
     }
 
 
@@ -241,9 +256,9 @@ def plot_spectrum_comparison(wavelength, pred_spectrum, real_spectrum,
 
 
 @torch.no_grad()
-def generate_test_spectra(model, test_loader, device, output_dir, logger, num_samples=100):
+def generate_test_spectra(model, loader, device, output_dir, logger, num_samples=100):
     """
-    为测试集前 num_samples 个分子生成预测 vs 真实光谱对比图，
+    为数据集前 num_samples 个分子生成预测 vs 真实光谱对比图，
     并输出光谱差异统计。
     """
     model.eval()
@@ -252,13 +267,13 @@ def generate_test_spectra(model, test_loader, device, output_dir, logger, num_sa
     wavelength_grid = np.arange(80.0, 451.0, 1.0)  # 80~450 nm，步长 1 nm
     sigma = 0.4
 
-    logger.info(f"Generating spectra for first {num_samples} test molecules...")
+    logger.info(f"Generating spectra for first {num_samples} molecules...")
     logger.info(f"Output directory: {output_dir}")
 
     count = 0
     errors = []
 
-    for data in test_loader:
+    for data in loader:
         if count >= num_samples:
             break
 
@@ -270,17 +285,17 @@ def generate_test_spectra(model, test_loader, device, output_dir, logger, num_sa
             if count >= num_samples:
                 break
 
-            E_pred    = pred['E_pred'][i].cpu().numpy()
-            R_pred    = pred['R_pred'][i].cpu().numpy()
+            E_pred = pred['E_pred'][i].cpu().numpy()
+            R_pred = pred['R_pred'][i].cpu().numpy()
 
             # 真实值（10^-40 cgs）
             if data.y_E.dim() == 2:
-                E_real    = data.y_E[i].cpu().numpy()
-                R_real    = data.y_R[i].cpu().numpy()
+                E_real = data.y_E[i].cpu().numpy()
+                R_real = data.y_R[i].cpu().numpy()
             else:
                 s, e = i * n_states, (i + 1) * n_states
-                E_real    = data.y_E[s:e].cpu().numpy()
-                R_real    = data.y_R[s:e].cpu().numpy()
+                E_real = data.y_E[s:e].cpu().numpy()
+                R_real = data.y_R[s:e].cpu().numpy()
 
             pred_spectrum = generate_spectrum(E_pred, R_pred, wavelength_grid, sigma)
             real_spectrum = generate_spectrum(E_real, R_real, wavelength_grid, sigma)
@@ -327,11 +342,11 @@ def collect_predictions(model, loader, device):
     n_states = model.n_states
 
     all_mol_ids = []
-    all_smiles = []
-    all_E_pred = []
-    all_E_true = []
-    all_R_pred = []
-    all_R_true = []
+    all_smiles  = []
+    all_E_pred  = []
+    all_E_true  = []
+    all_R_pred  = []
+    all_R_true  = []
 
     for data in loader:
         data = data.to(device)
@@ -390,7 +405,6 @@ def _plot_scatter(x_true, x_pred, pearson_r, xlabel, ylabel, title, save_path, l
     """绘制预测 vs 真实值散点图，含 y=x 参考线和 Pearson 相关系数标注。"""
     fig, ax = plt.subplots(figsize=(7, 7), dpi=150)
     ax.scatter(x_true, x_pred, alpha=0.1, s=1, color='steelblue', rasterized=True)
-    # y=x 参考线
     lo = min(x_true.min(), x_pred.min())
     hi = max(x_true.max(), x_pred.max())
     ax.plot([lo, hi], [lo, hi], 'r--', linewidth=1.5, alpha=0.8, label='y = x')
@@ -409,8 +423,8 @@ def _plot_best_worst_spectra(pcc_values, mol_ids, E_pred, E_true, R_pred, R_true
                               wavelength_grid, output_dir, logger, n=5):
     """绘制 PCC 最高/最低 n 个分子的光谱对比图。"""
     sorted_idx = np.argsort(pcc_values)
-    worst_idx = sorted_idx[:n]
-    best_idx  = sorted_idx[-n:][::-1]
+    worst_idx  = sorted_idx[:n]
+    best_idx   = sorted_idx[-n:][::-1]
 
     for rank, idx in enumerate(best_idx, start=1):
         pred_spec = generate_spectrum(E_pred[idx], R_pred[idx], wavelength_grid)
@@ -520,7 +534,7 @@ def run_quantitative_evaluation(collected, output_dir, logger):
         f.write("PhysECD Quantitative Evaluation Summary\n")
         f.write("=" * 50 + "\n")
         f.write(f"Total molecules: {N}\n\n")
-        f.write("--- Discrete State Metrics (N molecules × 20 states flattened) ---\n")
+        f.write("--- Discrete State Metrics (N molecules x 20 states flattened) ---\n")
         f.write(f"E MAE:            {e_mae_global:.6f} eV\n")
         f.write(f"E Pearson:        {e_pearson_global:.6f}\n")
         f.write(f"R MAE:            {r_mae_global:.4f} (10^-40 cgs)\n")
@@ -568,23 +582,40 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # 确定输出目录
-    ckpt_path = Path(args.checkpoint)
-    output_dir = args.output_dir or str(ckpt_path.parent / 'test_spectra')
+    ckpt_path  = Path(args.checkpoint)
+    output_dir = args.output_dir or str(ckpt_path.parent / f'{args.split}_evaluation')
     logger = setup_logging(output_dir)
 
     logger.info("=" * 80)
-    logger.info("PhysECD Test Set Evaluation")
+    logger.info(f"PhysECD Evaluation  [split = {args.split.upper()}]")
     logger.info("=" * 80)
     logger.info(f"Device:     {device}")
     logger.info(f"Checkpoint: {args.checkpoint}")
     logger.info(f"Data dir:   {args.data_dir}")
+    logger.info(f"Split:      {args.split}")
     logger.info(f"Output dir: {output_dir}")
 
     # 加载 checkpoint
     logger.info("\nLoading checkpoint...")
     checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
-    config = checkpoint['config']
-    epoch  = checkpoint.get('epoch', '?')
+    config = checkpoint.get('config')
+    if config is None:
+        logger.warning("Checkpoint does not contain 'config', using default parameters...")
+        config = {
+            'num_features': 128,
+            'max_l': 3,
+            'num_blocks': 3,
+            'num_radial': 32,
+            'cutoff': 50.0,
+            'n_states': 20,
+            'max_atomic_number': 60,
+            'lambda_E': 1.0,
+            'lambda_mu_vel': 0.0,
+            'lambda_m': 0.0,
+            'lambda_R': 1.0,
+            'lambda_R_sign': 0.0,
+        }
+    epoch = checkpoint.get('epoch', '?')
     logger.info(f"Checkpoint from epoch {epoch}, val_loss={checkpoint.get('val_loss', 'N/A')}")
 
     # 构建模型并加载权重
@@ -593,24 +624,26 @@ def main():
     model.load_state_dict(checkpoint['model_state_dict'])
     logger.info(f"Model: {model.get_num_params():,} parameters")
 
-    # 加载测试集
-    logger.info("\nLoading test data...")
-    test_path = os.path.join(args.data_dir, 'test.pt')
-    test_data = torch.load(test_path, weights_only=False)
-    test_loader = DataLoader(
-        test_data,
+    # 加载指定分割的数据
+    logger.info(f"\nLoading {args.split} data...")
+    data_path = os.path.join(args.data_dir, f'{args.split}.pt')
+    if not Path(data_path).exists():
+        raise FileNotFoundError(f"数据文件不存在：{data_path}")
+    data_list = torch.load(data_path, weights_only=False)
+    loader = DataLoader(
+        data_list,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=True
     )
-    logger.info(f"Loaded {len(test_data)} test samples")
+    logger.info(f"Loaded {len(data_list)} {args.split} samples")
 
-    # 测试集指标评估
+    # 指标评估
     logger.info("\n" + "=" * 80)
-    logger.info("Test Set Metrics")
+    logger.info(f"{args.split.capitalize()} Set Metrics")
     logger.info("=" * 80)
-    metrics = evaluate(model, test_loader, criterion, device, logger)
+    metrics = evaluate(model, loader, criterion, device, logger)
     logger.info(
         f"Normalized Loss: {metrics['loss']:.4f}  "
         f"(E: {metrics['loss_E']:.4f}, "
@@ -626,21 +659,21 @@ def main():
     )
     logger.info(f"R Sign Acc: {metrics['R_sign_acc']:.4f}")
 
-    # 批量光谱生成与对比
+    # 批量光谱生成
     logger.info("\n" + "=" * 80)
     logger.info("Generating Spectrum Comparisons")
     logger.info("=" * 80)
     generate_test_spectra(
-        model, test_loader, device, output_dir, logger,
+        model, loader, device, os.path.join(output_dir, 'spectra'), logger,
         num_samples=args.num_spectra
     )
 
-    # 定量评估（全量收集预测 + 计算指标 + 保存文件）
+    # 定量评估
     logger.info("\n" + "=" * 80)
     logger.info("Quantitative Evaluation")
     logger.info("=" * 80)
-    logger.info("Collecting predictions for all test molecules...")
-    collected = collect_predictions(model, test_loader, device)
+    logger.info(f"Collecting predictions for all {len(data_list)} {args.split} molecules...")
+    collected = collect_predictions(model, loader, device)
     logger.info(f"Collected {len(collected['mol_ids'])} molecules")
     run_quantitative_evaluation(collected, output_dir, logger)
 

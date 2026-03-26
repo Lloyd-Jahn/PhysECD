@@ -489,7 +489,7 @@ def main():
         'learning_rate': 2e-3,
         'weight_decay': 1e-5,
         'num_workers': 8,
-        # Model hyperparameters - 完全照搬
+        # Model hyperparameters
         'num_features': 128,
         'max_l': 2,
         'num_blocks': 3,
@@ -498,11 +498,11 @@ def main():
         'n_states': 20,
         'max_atomic_number': 60,
         
-        # Loss Weights（归一化后的相对权重）- 完全照搬
+        # Loss Weights（归一化后的相对权重）
         'lambda_E': 1.0,
-        'lambda_mu_vel': 1.0,
-        'lambda_m': 1.0,
-        'lambda_R': 0,
+        'lambda_mu_vel': 1.0,   # 联合 μ-m 相位损失权重
+        'lambda_m': 1.0,        # 保留参数，联合约束中已隐含
+        'lambda_R': 1.0,
         'lambda_R_sign': 0.0,
     }
 

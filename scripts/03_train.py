@@ -248,13 +248,117 @@ def validate(model, loader, criterion, device, logger):
     return loss_components
 
 
+def is_pareto_dominated(candidate, existing):
+    """
+    判断 candidate 是否被 existing 支配。
+    帕累托目标：R_mae（R 的 L1/MAE）和 E_mse（E 的 MSE），均越小越好。
+    两个目标直接对应 ECD 光谱预测质量，不引入 μ_vel/m 等中间量。
+    """
+    objectives = ['R_mae', 'E_mse']  # 均越小越好
+
+    not_worse      = all(existing[k] <= candidate[k] for k in objectives)
+    strictly_better = any(existing[k] <  candidate[k] for k in objectives)
+
+    return not_worse and strictly_better
+
+
+def update_pareto_frontier(pareto_checkpoints, candidate_loss, candidate_info, max_checkpoints=10):
+    """
+    将新候选加入帕累托前沿（若未被支配），并剔除被其支配的旧检查点。
+    返回更新后的前沿列表和需要删除的 checkpoint 文件路径。
+    """
+    # 如果被任一现有点支配，直接拒绝
+    for existing_loss, _ in pareto_checkpoints:
+        if is_pareto_dominated(candidate_loss, existing_loss):
+            return pareto_checkpoints, []
+
+    # 加入前沿，同时移除被新点支配的旧点
+    new_pareto = []
+    removed_paths = []
+    for existing_loss, existing_info in pareto_checkpoints:
+        if not is_pareto_dominated(existing_loss, candidate_loss):
+            new_pareto.append((existing_loss, existing_info))
+        else:
+            if 'checkpoint_path' in existing_info:
+                removed_paths.append(existing_info['checkpoint_path'])
+    new_pareto.append((candidate_loss, candidate_info))
+
+    # 超出上限时按综合评分裁剪：R_mae 优先（权重更高），E_mse 次之
+    if len(new_pareto) > max_checkpoints:
+        def pareto_score(item):
+            d = item[0]
+            return d.get('R_mae', 0) * 10 + d.get('E_mse', 0)
+        new_pareto.sort(key=pareto_score)
+        for _, info in new_pareto[max_checkpoints:]:
+            if 'checkpoint_path' in info:
+                removed_paths.append(info['checkpoint_path'])
+        new_pareto = new_pareto[:max_checkpoints]
+
+    return new_pareto, removed_paths
+
+
+def save_pareto_checkpoint(model, optimizer, scheduler, epoch, val_components,
+                           checkpoint_dir, config, pareto_checkpoints, logger,
+                           max_checkpoints=10):
+    """
+    基于帕累托最优策略保存检查点。
+    帕累托目标：R_mae（验证集 R 的 L1/MAE）和 E_mse（验证集 E 的 MSE），均越小越好。
+    这两个指标直接对应 ECD 光谱预测质量，μ_vel/m 作为训练辅助量不纳入选模型标准。
+    """
+    candidate_loss = {
+        'R_mae': val_components.get('loss_R', float('inf')),    # F.l1_loss(R_pred, R_true) = R MAE
+        'E_mse': val_components.get('loss_E_raw', float('inf')), # F.mse_loss(E_pred, E_true)
+    }
+
+    checkpoint_path = os.path.join(checkpoint_dir, f'pareto_epoch_{epoch}.pt')
+    candidate_info  = {
+        'epoch': epoch,
+        'checkpoint_path': checkpoint_path,
+        'total_normalized_loss': val_components.get('loss', float('inf')),
+    }
+
+    # 先写文件（update_pareto_frontier 可能删除被支配的旧文件）
+    torch.save({
+        'epoch':                epoch,
+        'model_state_dict':     model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'val_loss':             val_components.get('loss', float('inf')),
+        'pareto_metrics':       candidate_loss,
+        'config':               config,
+    }, checkpoint_path)
+
+    pareto_checkpoints, removed_paths = update_pareto_frontier(
+        pareto_checkpoints, candidate_loss, candidate_info, max_checkpoints
+    )
+
+    for path in removed_paths:
+        if os.path.exists(path):
+            os.remove(path)
+            logger.info(f"  Removed dominated checkpoint: {os.path.basename(path)}")
+
+    # 若新点未进入前沿（仍被支配），删除刚才写的文件
+    in_frontier = any(info.get('checkpoint_path') == checkpoint_path
+                      for _, info in pareto_checkpoints)
+    if not in_frontier and os.path.exists(checkpoint_path):
+        os.remove(checkpoint_path)
+
+    logger.info(f"  Pareto frontier: {len(pareto_checkpoints)} checkpoints")
+    for i, (d, info) in enumerate(pareto_checkpoints):
+        logger.info(f"    [{i+1}] Epoch {info['epoch']}: "
+                    f"R_mae={d['R_mae']:.4f} (10^-40 cgs), "
+                    f"E_mse={d['E_mse']:.6f} eV²")
+
+    return pareto_checkpoints
+
+
 def plot_loss_curves(train_losses, val_losses, save_path):
     """绘制并保存训练/验证损失曲线（3×3，9 个子图）。"""
     fig = plt.figure(figsize=(20, 12))
 
     epochs = range(1, len(train_losses['total']) + 1)
 
-    # 第 1 行：归一化总损失 + 各分量归一化损失
+    # 第 1 行：归一化总损失 + E 归一化 + 联合 μ-m 归一化
     plt.subplot(3, 3, 1)
     plt.plot(epochs, train_losses['total'], 'b-', label='Train', linewidth=2)
     plt.plot(epochs, val_losses['total'], 'r-', label='Validation', linewidth=2)
@@ -276,27 +380,17 @@ def plot_loss_curves(train_losses, val_losses, save_path):
     plt.yscale('log')
 
     plt.subplot(3, 3, 3)
-    plt.plot(epochs, train_losses['mu_vel'], 'b-', label='Train', linewidth=2)
-    plt.plot(epochs, val_losses['mu_vel'], 'r-', label='Validation', linewidth=2)
+    plt.plot(epochs, train_losses['norm_mu_m'], 'b-', label='Train', linewidth=2)
+    plt.plot(epochs, val_losses['norm_mu_m'], 'r-', label='Validation', linewidth=2)
     plt.xlabel('Epoch')
     plt.ylabel('Normalized Loss')
-    plt.title('Velocity Electric Dipole Loss (Normalized)')
+    plt.title('Joint mu_vel + m Loss (Normalized, same phase)')
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.yscale('log')
 
-    # 第 2 行：磁偶极矩归一化 + R 归一化 + 激发能原始 MSE
+    # 第 2 行：R 归一化 + R_sign_acc + 激发能原始 MSE
     plt.subplot(3, 3, 4)
-    plt.plot(epochs, train_losses['m'], 'b-', label='Train', linewidth=2)
-    plt.plot(epochs, val_losses['m'], 'r-', label='Validation', linewidth=2)
-    plt.xlabel('Epoch')
-    plt.ylabel('Normalized Loss')
-    plt.title('Magnetic Dipole Loss (Normalized)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.yscale('log')
-
-    plt.subplot(3, 3, 5)
     plt.plot(epochs, train_losses['R'], 'b-', label='Train', linewidth=2)
     plt.plot(epochs, val_losses['R'], 'r-', label='Validation', linewidth=2)
     plt.xlabel('Epoch')
@@ -305,6 +399,16 @@ def plot_loss_curves(train_losses, val_losses, save_path):
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.yscale('log')
+
+    plt.subplot(3, 3, 5)
+    plt.plot(epochs, train_losses['R_sign_acc'], 'b-', label='Train', linewidth=2)
+    plt.plot(epochs, val_losses['R_sign_acc'], 'r-', label='Validation', linewidth=2)
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.title('R Sign Prediction Accuracy')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.ylim(0, 1)
 
     plt.subplot(3, 3, 6)
     plt.plot(epochs, train_losses['E_raw'], 'b-', label='Train (Raw)', linewidth=2)
@@ -372,8 +476,8 @@ def main():
         'max_atomic_number': 60,
         # 损失权重（EMA 归一化后的相对权重）
         'lambda_E': 1.0,
-        'lambda_mu_vel': 1.0,
-        'lambda_m': 0.0,
+        'lambda_mu_vel': 1.0,   # 联合 μ-m 相位损失权重（同时约束 μ 和 m）
+        'lambda_m': 1.0,        # 保留参数，mu-m 联合约束中已隐含，不再单独加权
         'lambda_R': 1.0,
         'lambda_R_sign': 0.0,
     }
@@ -435,12 +539,13 @@ def main():
 
     # 训练记录
     best_val_loss = float('inf')
+    pareto_checkpoints = []   # 帕累托前沿检查点列表
     train_losses = {
-        'total': [], 'E': [], 'mu_vel': [], 'm': [], 'R': [], 'R_sign_acc': [],
+        'total': [], 'E': [], 'norm_mu_m': [], 'R': [], 'R_sign_acc': [],
         'E_raw': [], 'mu_vel_raw': [], 'm_raw': [], 'R_raw': []
     }
     val_losses = {
-        'total': [], 'E': [], 'mu_vel': [], 'm': [], 'R': [], 'R_sign_acc': [],
+        'total': [], 'E': [], 'norm_mu_m': [], 'R': [], 'R_sign_acc': [],
         'E_raw': [], 'mu_vel_raw': [], 'm_raw': [], 'R_raw': []
     }
 
@@ -494,7 +599,7 @@ def main():
 
         # 记录损失曲线数据
         key_map = {
-            'total': 'loss', 'E': 'loss_E', 'mu_vel': 'loss_mu_vel', 'm': 'loss_m',
+            'total': 'loss', 'E': 'loss_E', 'norm_mu_m': 'norm_mu_m',
             'R': 'loss_R', 'R_sign_acc': 'R_sign_acc',
             'E_raw': 'loss_E_raw', 'mu_vel_raw': 'loss_mu_vel_raw',
             'm_raw': 'loss_m_raw', 'R_raw': 'loss_R_raw'
@@ -505,9 +610,9 @@ def main():
             if comp_key in val_components:
                 val_losses[plot_key].append(val_components[comp_key])
 
-        # 保存最佳模型
-        if val_components['loss'] < best_val_loss:
-            best_val_loss = val_components['loss']
+        # 保存最佳模型（按验证集 R MAE，直接对应 ECD 光谱预测质量）
+        if val_components['loss_R'] < best_val_loss:
+            best_val_loss = val_components['loss_R']
             checkpoint_path = os.path.join(config['checkpoint_dir'], 'best_model.pt')
             torch.save({
                 'epoch': epoch,
@@ -517,7 +622,14 @@ def main():
                 'val_loss': val_components['loss'],
                 'config': config
             }, checkpoint_path)
-            logger.info(f"  Saved best model (val_loss: {val_components['loss']:.4f})")
+            logger.info(f"  Saved best model (val R MAE: {val_components['loss_R']:.4f})")
+
+        # 帕累托前沿检查点（四目标：E/mu_vel/m raw MSE + R_sign_acc）
+        pareto_checkpoints = save_pareto_checkpoint(
+            model, optimizer, scheduler, epoch, val_components,
+            config['checkpoint_dir'], config, pareto_checkpoints, logger,
+            max_checkpoints=10
+        )
 
         # 每 100 epoch 保存一次 checkpoint
         if epoch % 100 == 0:
@@ -545,7 +657,7 @@ def main():
     logger.info("\n" + "=" * 80)
     logger.info("Training completed!")
     logger.info("=" * 80)
-    logger.info(f"Best validation loss: {best_val_loss:.4f}")
+    logger.info(f"Best val R MAE: {best_val_loss:.4f} (10^-40 cgs)")
     logger.info(f"Best model saved to: {os.path.join(config['checkpoint_dir'], 'best_model.pt')}")
     logger.info("=" * 80)
 
