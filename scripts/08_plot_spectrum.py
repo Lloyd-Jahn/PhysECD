@@ -1,17 +1,13 @@
 """
-Plot ECD Spectrum Comparison (Predicted vs Real)
-================================================
-读取预测光谱和真实光谱的 CSV 文件，将两条曲线绘制在同一张图中。
+读取预测光谱和真实光谱的 CSV 文件，将两条曲线绘制在同一张图中
 
 Features:
 - 蓝色实线：真实光谱（Real）
 - 红色虚线：预测光谱（Predicted）
-- 高分辨率输出（300 DPI）
-- 专业出版风格：网格、基线、图例、粗体坐标轴标签
 
 运行指令：
-cd 到 PhysECD 项目根目录下，执行：
-python scripts/08_plot_spectrum.py --pred_csv path/to/predicted.csv --real_csv path/to/real.csv
+  cd 到 PhysECD 项目根目录下，执行：
+  python scripts/08_plot_spectrum.py --pred_csv path/to/predicted.csv --real_csv path/to/real.csv
 """
 
 import argparse
@@ -31,13 +27,13 @@ def parse_args():
         '--pred_csv',
         type=str,
         required=True,
-        help='预测光谱 CSV 文件路径（需包含 Wavelength (nm) 和 [θ] 两列）'
+        help='预测光谱 CSV 文件路径'
     )
     parser.add_argument(
         '--real_csv',
         type=str,
         required=True,
-        help='真实光谱 CSV 文件路径（需包含 Wavelength (nm) 和 [θ] 两列）'
+        help='真实光谱 CSV 文件路径'
     )
     parser.add_argument(
         '--output_path',
@@ -49,7 +45,7 @@ def parse_args():
         '--title',
         type=str,
         default=None,
-        help='图表标题（可选）'
+        help='图表标题'
     )
     parser.add_argument(
         '--dpi',

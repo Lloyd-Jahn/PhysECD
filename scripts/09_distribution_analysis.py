@@ -32,7 +32,7 @@ sys.path.insert(0, str(project_root))
 # RDKit 导入
 try:
     from rdkit import Chem, DataStructs
-    from rdkit.Chem import AllChem
+    from rdkit.Chem import rdFingerprintGenerator
     RDKIT_AVAILABLE = True
 except ImportError:
     RDKIT_AVAILABLE = False
@@ -79,8 +79,8 @@ def parse_args():
     parser.add_argument(
         '--output_dir',
         type=str,
-        default='checkpoints/distribution_analysis',
-        help='输出目录（默认：checkpoints/distribution_analysis）'
+        default='distribution_analysis',
+        help='输出目录（默认：distribution_analysis）'
     )
     return parser.parse_args()
 
@@ -133,16 +133,9 @@ def load_pcc_csv(pcc_csv_path):
 
 
 def find_pcc_csv(project_root):
-    """在常见路径中搜索 per_molecule_metrics.csv。"""
-    candidates = [
-        project_root / 'checkpoints' / 'test_spectra (3.26)' / 'quantitative' / 'per_molecule_metrics.csv',
-        project_root / 'checkpoints' / 'test_spectra' / 'quantitative' / 'per_molecule_metrics.csv',
-        project_root / 'checkpoints' / 'test_spectra (3.24)' / 'quantitative' / 'per_molecule_metrics.csv',
-    ]
-    for p in candidates:
-        if p.exists():
-            return str(p)
-    return None
+    """搜索 per_molecule_metrics.csv。"""
+    path = "checkpoints/test_evaluation/quantitative/per_molecule_metrics.csv"
+    return path
 
 
 # ──────────────────────────────────────────────
@@ -154,7 +147,12 @@ def compute_morgan_fp(smiles, radius=2, n_bits=2048):
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return None
-    return AllChem.GetMorganFingerprintAsBitVect(mol, radius, nBits=n_bits, useChirality=True)
+    generator = rdFingerprintGenerator.GetMorganGenerator(
+        radius=radius,
+        fpSize=n_bits,
+        includeChirality=True,
+    )
+    return generator.GetFingerprint(mol)
 
 
 def _compute_similarities_for_group(records, train_fps, train_valid_idx, train_data):

@@ -1,18 +1,18 @@
 """
-评估脚本（支持 train / val / test 三个分割）
+模型评估脚本
 
-加载训练好的模型 checkpoint，在指定数据分割上计算各项指标，
+加载训练好的 checkpoint，在指定数据分割上计算各项指标，
 并批量生成预测光谱 vs 真实光谱对比图。
 
-运行指令（从项目根目录）：
+运行指令：
   # 评估测试集（默认）
   python scripts/04_evaluate.py
 
   # 评估训练集（用于确认过拟合程度）
   python scripts/04_evaluate.py --split train
 
-  # 评估验证集，指定 checkpoint
-  python scripts/04_evaluate.py --split val --checkpoint checkpoints/checkpoint_epoch_1000.pt
+  # 自行指定 checkpoint
+  python scripts/04_evaluate.py --checkpoint checkpoints/checkpoint_epoch_1900.pt
 """
 
 import os
@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 from scipy import stats as scipy_stats
 from torch_geometric.loader import DataLoader
 
-# 将项目根目录加入 sys.path
+# 添加父目录到系统路径，以确保能正确导入 physecd 模块
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
@@ -51,8 +51,8 @@ def parse_args():
     parser.add_argument(
         '--checkpoint',
         type=str,
-        default='checkpoints/best_model.pt',
-        help='模型 checkpoint 文件路径（默认：checkpoints/best_model.pt）'
+        default='checkpoints/checkpoint_epoch_2000.pt',
+        help='模型 checkpoint 文件路径（默认：checkpoints/checkpoint_epoch_2000.pt）'
     )
     parser.add_argument(
         '--data_dir',
@@ -111,28 +111,36 @@ def build_model_and_criterion(config, device):
         num_radial=config['num_radial'],
         cutoff=config['cutoff'],
         n_states=config['n_states'],
-        max_atomic_number=config['max_atomic_number']
+        max_atomic_number=config['max_atomic_number'],
     ).to(device)
 
     criterion = PhysECDLoss(
-        lambda_E=config['lambda_E'],
-        lambda_mu_vel=config['lambda_mu_vel'],
-        lambda_m=config['lambda_m'],
-        lambda_R=config['lambda_R'],
-        lambda_R_sign=config.get('lambda_R_sign', 0.0)
+        sigma=config.get('sigma', 0.4)
     ).to(device)
 
     return model, criterion
 
 
-def compute_raw_losses(pred, target, n_states):
+def compute_total_loss(loss_dict, config):
+    """
+    根据 checkpoint config 里的权重计算总损失。
+    """
+    return (
+        config.get('weight_shape', 1.0) * loss_dict['loss_shape'] +
+        config.get('weight_mag', 1.0) * loss_dict['loss_mag'] +
+        config.get('weight_E', 0.1) * loss_dict['loss_E'] +
+        config.get('weight_reg', 1e-4) * loss_dict['loss_reg']
+    )
+
+
+def compute_raw_losses(pred, batch_data, n_states):
     """计算原始损失（未归一化的 MSE），用于指标报告。"""
     batch_size = pred['E_pred'].shape[0]
 
-    y_E = target['y_E'].reshape(batch_size, n_states)
+    y_E = batch_data.y_E.reshape(batch_size, n_states)
     loss_E_raw = F.mse_loss(pred['E_pred'], y_E)
 
-    y_mu_vel = target['y_mu_vel'].reshape(batch_size, n_states, 3)
+    y_mu_vel = batch_data.y_mu_vel.reshape(batch_size, n_states, 3)
     mu_vel_diff = pred['mu_total_vel'] - y_mu_vel
     mu_vel_sum  = pred['mu_total_vel'] + y_mu_vel
     loss_mu_vel_raw = torch.min(
@@ -140,7 +148,7 @@ def compute_raw_losses(pred, target, n_states):
         (mu_vel_sum  ** 2).sum(dim=-1)
     ).mean()
 
-    y_m = target['y_m'].reshape(batch_size, n_states, 3)
+    y_m = batch_data.y_m.reshape(batch_size, n_states, 3)
     m_diff = pred['m_total'] - y_m
     m_sum  = pred['m_total'] + y_m
     loss_m_raw = torch.min(
@@ -148,7 +156,7 @@ def compute_raw_losses(pred, target, n_states):
         (m_sum  ** 2).sum(dim=-1)
     ).mean()
 
-    y_R = target['y_R'].reshape(batch_size, n_states)
+    y_R = batch_data.y_R.reshape(batch_size, n_states)
     loss_R_raw = F.mse_loss(pred['R_pred'], y_R)
 
     return {
@@ -160,42 +168,36 @@ def compute_raw_losses(pred, target, n_states):
 
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device, logger):
-    """在数据集上运行完整评估，返回归一化损失和原始损失。"""
+def evaluate(model, loader, criterion, device, logger, config):
+    """在数据集上运行完整评估，返回总损失、各分项损失和原始 MSE。"""
     model.eval()
 
     total_loss = 0.0
     total_raw = {'loss_E_raw': 0.0, 'loss_mu_vel_raw': 0.0,
                  'loss_m_raw': 0.0, 'loss_R_raw': 0.0}
-    components = {'loss_E': 0.0, 'loss_mu_vel': 0.0,
-                  'loss_m': 0.0, 'loss_R': 0.0, 'loss_R_sign': 0.0}
-    total_r_sign_acc = 0.0
+    components = None
     num_batches = 0
 
     for data in loader:
         data = data.to(device)
         pred = model(data)
-        target = {
-            'y_E':      data.y_E,
-            'y_mu_vel': data.y_mu_vel,
-            'y_m':      data.y_m,
-            'y_R':      data.y_R
-        }
-        loss, loss_dict = criterion(pred, target)
-        raw = compute_raw_losses(pred, target, model.n_states)
+        loss_dict = criterion(pred, data)
+        loss = compute_total_loss(loss_dict, config)
+        raw = compute_raw_losses(pred, data, model.n_states)
 
-        total_loss += loss_dict['loss']
-        for k in components:
-            components[k] += loss_dict[k]
+        total_loss += loss.item()
+        if components is None:
+            components = {k: 0.0 for k in loss_dict}
+        for k, v in loss_dict.items():
+            components[k] += v.item()
         for k in total_raw:
             total_raw[k] += raw[k]
-        total_r_sign_acc += loss_dict['R_sign_acc']
         num_batches += 1
 
-    components['loss']       = total_loss / num_batches
-    components['R_sign_acc'] = total_r_sign_acc / num_batches
+    components = components or {}
+    components['loss'] = total_loss / num_batches
     for k in list(components.keys()):
-        if k not in ('loss', 'R_sign_acc'):
+        if k != 'loss':
             components[k] /= num_batches
     for k in total_raw:
         total_raw[k] /= num_batches
@@ -337,7 +339,7 @@ def generate_test_spectra(model, loader, device, output_dir, logger, num_samples
 
 @torch.no_grad()
 def collect_predictions(model, loader, device):
-    """遍历整个数据集，收集所有预测值和真实值（用于定量评估）。"""
+    """遍历整个数据集，收集所有预测值和真实值。"""
     model.eval()
     n_states = model.n_states
 
@@ -465,13 +467,13 @@ def run_quantitative_evaluation(collected, output_dir, logger):
 
     mol_ids = collected['mol_ids']
     smiles  = collected['smiles']
-    E_pred  = collected['E_pred']   # [N, 20]
+    E_pred  = collected['E_pred']
     E_true  = collected['E_true']
     R_pred  = collected['R_pred']
     R_true  = collected['R_true']
     N = len(mol_ids)
 
-    wavelength_grid = np.arange(80.0, 451.0, 1.0)  # 80~450 nm，371 个点
+    wavelength_grid = np.arange(80.0, 451.0, 1.0)
 
     # --- 1. 全局离散态指标（展平所有 N×20 个数据点）---
     E_flat_pred = E_pred.flatten()
@@ -609,11 +611,11 @@ def main():
             'cutoff': 50.0,
             'n_states': 20,
             'max_atomic_number': 60,
-            'lambda_E': 1.0,
-            'lambda_mu_vel': 0.0,
-            'lambda_m': 0.0,
-            'lambda_R': 1.0,
-            'lambda_R_sign': 0.0,
+            'weight_shape': 1.0,
+            'weight_mag': 1.0,
+            'weight_E': 0.1,
+            'weight_reg': 1e-4,
+            'sigma': 0.4,
         }
     epoch = checkpoint.get('epoch', '?')
     logger.info(f"Checkpoint from epoch {epoch}, val_loss={checkpoint.get('val_loss', 'N/A')}")
@@ -621,7 +623,11 @@ def main():
     # 构建模型并加载权重
     logger.info("\nBuilding model...")
     model, criterion = build_model_and_criterion(config, device)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    load_result = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+    if load_result.missing_keys:
+        logger.warning("Missing model keys when loading checkpoint: %s", load_result.missing_keys)
+    if load_result.unexpected_keys:
+        logger.warning("Unexpected model keys when loading checkpoint: %s", load_result.unexpected_keys)
     logger.info(f"Model: {model.get_num_params():,} parameters")
 
     # 加载指定分割的数据
@@ -643,13 +649,14 @@ def main():
     logger.info("\n" + "=" * 80)
     logger.info(f"{args.split.capitalize()} Set Metrics")
     logger.info("=" * 80)
-    metrics = evaluate(model, loader, criterion, device, logger)
+    metrics = evaluate(model, loader, criterion, device, logger, config)
+    component_parts = []
+    for key in ('loss_shape', 'loss_mag', 'loss_E', 'loss_reg'):
+        if key in metrics:
+            component_parts.append(f"{key}: {metrics[key]:.4f}")
     logger.info(
-        f"Normalized Loss: {metrics['loss']:.4f}  "
-        f"(E: {metrics['loss_E']:.4f}, "
-        f"mu_vel: {metrics['loss_mu_vel']:.4f}, "
-        f"m: {metrics['loss_m']:.4f}, "
-        f"R: {metrics['loss_R']:.4f})"
+        f"Weighted Loss: {metrics['loss']:.4f}"
+        + (f"  ({', '.join(component_parts)})" if component_parts else "")
     )
     logger.info(
         f"Raw MSE: E={metrics['loss_E_raw']:.4f}, "
@@ -657,7 +664,6 @@ def main():
         f"m={metrics['loss_m_raw']:.4f}, "
         f"R={metrics['loss_R_raw']:.4f}"
     )
-    logger.info(f"R Sign Acc: {metrics['R_sign_acc']:.4f}")
 
     # 批量光谱生成
     logger.info("\n" + "=" * 80)

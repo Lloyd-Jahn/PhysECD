@@ -5,7 +5,7 @@ CMCDS数据集的数据准备脚本
 
 工作流程：
 1. 解析CSV文件获取分子ID和标签（激发能E, 旋转强度R）
-2. 解析Gaussian输出文件（.log）获取标准坐标系下的3D结构和偶极矩张量（完全移除对.gjf的依赖）
+2. 解析Gaussian输出文件（.log）获取标准坐标系下的3D结构和偶极矩
 3. 合并特征与标签数据，并保存为PyG的Data对象
 4. 划分为训练集/验证集/测试集
 """
@@ -32,8 +32,8 @@ def parse_args():
     parser.add_argument(
         '--csv_path',
         type=str,
-        default='/home/data/jiangyi/PhysECD-3.17修改-公式严谨性检查+单独训练R/data/CMCDS_DATASET.csv',
-        help='CMCDS_DATASET.csv文件的路径（已校正单位的版本）'
+        default='data/CMCDS_DATASET.csv',
+        help='CMCDS_DATASET.csv文件的路径'
     )
     parser.add_argument(
         '--log_dir',
@@ -44,7 +44,7 @@ def parse_args():
     parser.add_argument(
         '--output_dir',
         type=str,
-        default='/home/data/jiangyi/PhysECD-3.17修改-公式严谨性检查+单独训练R/data/processed',
+        default='data/processed',
         help='处理后的PyG .pt数据文件输出目录'
     )
     parser.add_argument(
@@ -56,13 +56,13 @@ def parse_args():
     parser.add_argument(
         '--train_ratio',
         type=float,
-        default=0.8,
+        default=0.9,
         help='训练集比例'
     )
     parser.add_argument(
         '--val_ratio',
         type=float,
-        default=0.1,
+        default=0.05,
         help='验证集比例'
     )
 
@@ -126,7 +126,6 @@ def main():
     # 初始化解析器
     print("\n[1/5] 正在初始化解析器...")
     csv_parser = CMCDSCSVParser(args.csv_path)
-    # 此处已适配更新后的 GaussianParser，仅需要 log_dir 参数
     gaussian_parser = GaussianParser(args.log_dir)
     
     print(f"  CSV 解析器已初始化，路径: {args.csv_path}")
@@ -167,7 +166,7 @@ def main():
     n_val = int(n_total * args.val_ratio)
     n_test = n_total - n_train - n_val
 
-    # 固定随机种子以确保划分结果可复现，保证对比实验的严谨性
+    # 固定随机种子以确保划分结果可复现
     torch.manual_seed(42)
     indices = torch.randperm(n_total).tolist()
 
@@ -224,7 +223,7 @@ def main():
     print(f"    - 标准差: {all_R.std():.4e}")
 
     print("\n" + "=" * 80)
-    print("数据准备流程已全部完成！")
+    print("数据准备流程已完成！")
     print("=" * 80)
 
 

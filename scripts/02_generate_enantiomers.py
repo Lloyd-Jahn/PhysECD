@@ -1,7 +1,7 @@
 """
 生成 CMCDS 数据集的对映异构体数据
 ===========================================
-本脚本通过应用几何和矢量的对称性变换，为数据集中的所有分子生成对映异构体（镜像）数据。
+本脚本通过应用几何和矢量的对称性变换，为数据集中的所有分子生成对映异构体数据。
 
 变换规则：跨 XY 平面进行镜像反射
 - 空间坐标：(x, y, z) → (x, y, -z)
@@ -11,7 +11,7 @@
 - 激发能：保持不变
 - SMILES：手性中心标识 '@' 和 '@@' 互换
 
-此操作在不需要进行新的 DFT 计算的情况下，从物理底层将数据集的规模扩大了一倍 (10887 -> 21774)。
+此操作在不需要进行新的 DFT 计算的情况下，从物理底层将数据集的规模扩大了一倍。
 """
 
 import sys
@@ -34,26 +34,26 @@ def parse_args():
     parser.add_argument(
         '--input_dir',
         type=str,
-        default='/home/data/jiangyi/PhysECD-3.17修改-公式严谨性检查+单独训练R/data/processed',
+        default='data/processed',
         help='包含原始 .pt 数据文件的目录'
     )
     parser.add_argument(
         '--output_dir',
         type=str,
-        default='/home/data/jiangyi/PhysECD-3.17修改-公式严谨性检查+单独训练R/data/processed_with_enantiomers',
+        default='data/processed_with_enantiomers',
         help='包含扩展后 .pt 文件的输出目录'
     )
     parser.add_argument(
         '--csv_output',
         type=str,
-        default='/home/data/jiangyi/PhysECD-3.17修改-公式严谨性检查+单独训练R/data/CMCDS_DATASET_with_enantiomers.csv',
+        default='data/CMCDS_DATASET_with_enantiomers.csv',
         help='扩展后的 CSV 文件的输出路径'
     )
     parser.add_argument(
         '--original_csv',
         type=str,
-        default='/home/data/jiangyi/PhysECD-3.17修改-公式严谨性检查+单独训练R/data/CMCDS_DATASET.csv',
-        help='CMCDS_DATASET.csv 路径（用于提取波长数据）'
+        default='data/CMCDS_DATASET.csv',
+        help='原始 CMCDS_DATASET.csv 路径'
     )
 
     return parser.parse_args()
@@ -123,7 +123,7 @@ def verify_transformation(original: Data, enantiomer: Data):
     mu_dot_m_original = (original.y_mu_vel * original.y_m).sum(dim=1)
     mu_dot_m_enantiomer = (enantiomer.y_mu_vel * enantiomer.y_m).sum(dim=1)
 
-    # 计算绝对误差，避免除以负数时引发的符号漂移问题
+    # 计算绝对误差
     max_error = torch.abs(mu_dot_m_enantiomer + mu_dot_m_original).max().item()
     return max_error
 
@@ -279,11 +279,11 @@ def main():
     generate_expanded_csv(train_expanded, val_expanded, test_expanded, args.csv_output, wavelength_map)
 
     print("\n" + "=" * 80)
-    print("对映异构体数据生成任务圆满完成！")
+    print("对映异构体数据生成任务完成！")
     print("=" * 80)
 
     # 打印一个抽样对比进行确认
-    print("\n[示例抽样检查]")
+    print("\n【示例抽样检查】")
     original = train_data[0]
     enantiomer = train_expanded[1]
 

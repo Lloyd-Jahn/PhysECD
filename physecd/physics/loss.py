@@ -1,177 +1,112 @@
-"""
-Multi-task loss function for PhysECD training.
-
-Implements weighted MSE loss across multiple physical quantities,
-with strict consideration of Quantum Chemistry unit conversions.
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 class PhysECDLoss(nn.Module):
     """
-    Multi-task MSE loss for PhysECD model.
-
-    Computes weighted mean squared error across 4 physical quantities:
-    1. Excitation energies (E)
-    2. Velocity electric dipole moments (mu_vel)
-    3. Magnetic dipole moments (m)
-    4. Rotatory strengths (R)
-
-    Args:
-        lambda_E: Weight for excitation energy loss (default: 1.0)
-        lambda_mu_vel: Weight for velocity electric dipole loss (default: 1.0)
-        lambda_m: Weight for magnetic dipole loss (default: 1.0)
-        lambda_R: Weight for rotatory strength loss (default: 1.0)
-        lambda_R_sign: Weight for R sign classification loss (default: 1.0)
-        ema_decay: EMA decay factor for loss normalization (default: 0.99)
+    Differentiable Spectrum Broadening Loss
+    计算基于高斯展宽的宏观光谱 Loss，消除能级交叉带来的微观排序惩罚。
     """
-
-    def __init__(
-        self,
-        lambda_E=1.0,
-        lambda_mu_vel=1.0,
-        lambda_m=1.0,
-        lambda_R=1.0,
-        lambda_R_sign=1.0,
-        ema_decay=0.99
-    ):
+    def __init__(self, sigma=0.4, wl_min=80.0, wl_max=450.0, wl_step=1.0):
         super().__init__()
+        self.sigma = sigma
+        
+        # 1. 预先构建波长网格 (Wavelength grid)
+        # 与 05_generate_pred_spectrum.py 保持绝对一致
+        wl_grid = torch.arange(wl_min, wl_max + wl_step, wl_step)
+        
+        # 2. 转换为能量网格 (Energy grid, eV)
+        e_grid = 1240.0 / wl_grid
+        
+        # 3. 注册为 buffer，确保它能随着模型自动移动到 GPU/CPU
+        # 维度设为 [1, 1, N_points] 以便后续直接进行张量广播
+        self.register_buffer('e_grid', e_grid.view(1, 1, -1))
+        
+        # 4. 物理常数
+        self.norm_constant = 2.296e1 * sigma * math.sqrt(math.pi)
+        self.theta_factor = 3298.2
 
-        self.lambda_E = lambda_E
-        self.lambda_mu_vel = lambda_mu_vel
-        self.lambda_m = lambda_m
-        self.lambda_R = lambda_R
-        self.lambda_R_sign = lambda_R_sign
-
-        # 损失归一化：用指数移动平均跟踪每个分量的量级
-        self.ema_decay = ema_decay
-        self.register_buffer('ema_E', torch.tensor(0.0))
-        self.register_buffer('ema_mu_vel', torch.tensor(0.0))
-        self.register_buffer('ema_m', torch.tensor(0.0))
-        self.register_buffer('ema_R', torch.tensor(0.0))
-        self.register_buffer('initialized', torch.tensor(False))
-
-    def forward(self, pred, target):
+    def generate_differentiable_spectrum(self, E_states, R_cgs):
         """
-        Compute multi-task loss.
-
-        Args:
-            pred: Dictionary of predictions from model
-                - E_pred:[Batch_size, 20]
-                - mu_total: [Batch_size, 20, 3] (in a.u.)
-                - m_total: [Batch_size, 20, 3] (in a.u.)
-                - R_pred: [Batch_size, 20] (in a.u., calculated via dot product)
-
-            target: Dictionary of ground truth values
-                - y_E:[Batch_size, 20]
-                - y_mu_vel:[Batch_size, 20, 3] (in a.u.)
-                - y_m:[Batch_size, 20, 3] (in a.u.)
-                - y_R: [Batch_size, 20] (in 10^-40 cgs)
-
-        Returns:
-            total_loss: Scalar tensor with weighted total loss
-            loss_dict: Dictionary with loss values for logging
+        核心可微操作：将 20 个离散的 (E, R) 转化为连续的光谱曲线
+        E_states, R_cgs shape:[Batch_size, 20]
         """
-        # PyG DataLoader 将标签直接拼接，需要 reshape 对齐预测值的形状
-        batch_size = pred['E_pred'].shape[0]
-        n_states   = pred['E_pred'].shape[1]
+        # 扩展维度以进行广播: [B, 20] ->[B, 20, 1]
+        E_ext = E_states.unsqueeze(2)
+        R_ext = R_cgs.unsqueeze(2)
+        
+        # 计算高斯核: exp(-((E_grid - E_i) / sigma)^2)
+        # e_grid[1, 1, N_points] - E_ext [B, 20, 1] ->[B, 20, N_points]
+        gaussian = torch.exp(-((self.e_grid - E_ext) / self.sigma) ** 2)
+        
+        # 严格执行物理公式: Δε = Σ E_i * R_i * gaussian
+        # sum(dim=1) 把 20 个态的贡献叠加
+        delta_eps = torch.sum(E_ext * R_ext * gaussian, dim=1) / self.norm_constant  # [B, N_points]
+        
+        # 转化为摩尔椭圆度 [θ]
+        theta = delta_eps * self.theta_factor  # [B, N_points]
+        
+        return theta
 
-        # 1. 激发能 Loss
-        y_E = target['y_E'].reshape(batch_size, n_states)
-        loss_E = F.mse_loss(pred['E_pred'], y_E)
-
-        # 2. 速度电偶极矩 Loss - 保留两种相位的逐激发态损失（用于联合归一化）
-        y_mu_vel = target['y_mu_vel'].reshape(batch_size, n_states, 3)
-        mu_vel_diff = pred['mu_total_vel'] - y_mu_vel
-        mu_vel_sum  = pred['mu_total_vel'] + y_mu_vel
-        loss_mu_vel_phase1 = (mu_vel_diff ** 2).sum(dim=-1)  # [B, n_states]
-        loss_mu_vel_phase2 = (mu_vel_sum  ** 2).sum(dim=-1)  # [B, n_states]
-        loss_mu_vel = torch.min(loss_mu_vel_phase1, loss_mu_vel_phase2).mean()
-
-        # 3. 磁偶极矩 Loss - 保留两种相位的逐激发态损失（用于联合归一化）
-        y_m = target['y_m'].reshape(batch_size, n_states, 3)
-        m_diff = pred['m_total'] - y_m
-        m_sum  = pred['m_total'] + y_m
-        loss_m_phase1 = (m_diff ** 2).sum(dim=-1)  # [B, n_states]
-        loss_m_phase2 = (m_sum  ** 2).sum(dim=-1)  # [B, n_states]
-        loss_m = torch.min(loss_m_phase1, loss_m_phase2).mean()
-
-        # ====================================================================
-        # 4. 旋转强度 R Loss = L1 + Sign Classification (BCE)
-        # ====================================================================
-        y_R = target['y_R'].reshape(batch_size, n_states)
-
-        # R_pred 已经在 aggregation.py 中转换为 10^-40 cgs 单位
-        # 使用 L1 loss 替代 MSE，对异常值更鲁棒，减轻过拟合
-        loss_R_l1 = F.l1_loss(pred['R_pred'], y_R)
-
-        # 符号二分类：将 R 的正负作为辅助分类任务
-        y_R_sign = (y_R > 0).float()  # [B, n_states], 1=正, 0=负
-        R_sign_logits = pred['R_pred']  # 直接用 R_pred 值作 logits
-        loss_R_sign = F.binary_cross_entropy_with_logits(R_sign_logits, y_R_sign)
-
-        # R 的总 loss = L1（分类 loss 仅用于辅助监控）
-        loss_R = loss_R_l1
-
-        # 计算符号预测准确率（监控指标，不参与反向传播）
-        with torch.no_grad():
-            R_sign_pred = (pred['R_pred'] > 0).float()
-            r_sign_correct = (R_sign_pred == y_R_sign).float().mean()
-        # ====================================================================
-
-        # 损失归一化：用 EMA 跟踪每个分量的量级
-        with torch.no_grad():
-            if not self.initialized:
-                self.ema_E.copy_(loss_E.detach())
-                self.ema_mu_vel.copy_(loss_mu_vel.detach())
-                self.ema_m.copy_(loss_m.detach())
-                self.ema_R.copy_(loss_R.detach())
-                self.initialized.fill_(True)
-            else:
-                d = self.ema_decay
-                self.ema_E.mul_(d).add_(loss_E.detach(), alpha=1 - d)
-                self.ema_mu_vel.mul_(d).add_(loss_mu_vel.detach(), alpha=1 - d)
-                self.ema_m.mul_(d).add_(loss_m.detach(), alpha=1 - d)
-                self.ema_R.mul_(d).add_(loss_R.detach(), alpha=1 - d)
-
-        # 联合 μ-m 相位归一化：
-        # μ_vel 和 m 共享同一量子相位，因此必须同时翻转。
-        # 对两种相位分别将归一化后的 μ 损失和 m 损失相加，再取最小值，
-        # 保证两者一致地选择同一相位（而非各自独立选择）。
-        eps = 1e-8
-        norm_mu_vel_phase1 = loss_mu_vel_phase1.mean() / (self.ema_mu_vel + eps)
-        norm_mu_vel_phase2 = loss_mu_vel_phase2.mean() / (self.ema_mu_vel + eps)
-        norm_m_phase1      = loss_m_phase1.mean()      / (self.ema_m + eps)
-        norm_m_phase2      = loss_m_phase2.mean()      / (self.ema_m + eps)
-        norm_mu_m_phase1   = norm_mu_vel_phase1 + norm_m_phase1  # 同相位
-        norm_mu_m_phase2   = norm_mu_vel_phase2 + norm_m_phase2  # 反相位
-        norm_mu_m = torch.min(norm_mu_m_phase1, norm_mu_m_phase2)
-
-        norm_E = loss_E / (self.ema_E + eps)
-        norm_R = loss_R / (self.ema_R + eps)
-
-        # 加权总 loss：lambda_mu_vel 对联合归一化的 μ+m 损失加权
-        # （lambda_m 已隐含在 norm_mu_m 的联合约束中，不再单独加权）
-        total_loss = (
-            self.lambda_E      * norm_E   +
-            self.lambda_mu_vel * norm_mu_m +
-            self.lambda_R      * norm_R
-        )
-
-        loss_dict = {
-            'loss':         total_loss.item(),
-            'loss_E':       loss_E.item(),
-            'loss_mu_vel':  loss_mu_vel.item(),   # 各自独立取 min 后的值（用于监控/帕累托）
-            'loss_m':       loss_m.item(),         # 各自独立取 min 后的值（用于监控/帕累托）
-            'loss_R':       loss_R.item(),
-            'loss_R_l1':    loss_R_l1.item(),
-            'loss_R_sign':  loss_R_sign.item(),
-            'R_sign_acc':   r_sign_correct.item(),
-            'norm_E':       norm_E.item(),         # 归一化后各分量（用于绘图）
-            'norm_mu_m':    norm_mu_m.item(),
-            'norm_R':       norm_R.item(),
+    def forward(self, output_dict, batch_data):
+        """
+        计算各种 Loss 组件
+        """
+        # 模型预测值
+        E_pred = output_dict['E_pred']  #[B, 20]
+        R_pred = output_dict['R_pred']  #[B, 20]
+        
+        # 获取 Batch Size 和状态数
+        batch_size = E_pred.shape[0]
+        n_states = E_pred.shape[1]
+        
+        # 真实标签值
+        E_target = batch_data.y_E.view(batch_size, n_states)
+        R_target = batch_data.y_R.view(batch_size, n_states)
+        
+        # ---------------------------------------------------------
+        # 1. 生成宏观连续光谱
+        # ---------------------------------------------------------
+        pred_spectrum = self.generate_differentiable_spectrum(E_pred, R_pred)
+        target_spectrum = self.generate_differentiable_spectrum(E_target, R_target)
+        
+        # ---------------------------------------------------------
+        # 2. 形状匹配 Loss (最核心，关注峰的正负和相对位置)
+        # ---------------------------------------------------------
+        # 减去均值 (Centered Cosine Similarity 等价于 Pearson Correlation)
+        pred_centered = pred_spectrum - pred_spectrum.mean(dim=1, keepdim=True)
+        target_centered = target_spectrum - target_spectrum.mean(dim=1, keepdim=True)
+        
+        # cos_sim 范围 [-1, 1], 越接近 1 越好
+        cos_sim = F.cosine_similarity(pred_centered, target_centered, dim=1, eps=1e-8)
+        loss_shape = (1.0 - cos_sim).mean()  # 范围 [0, 2]
+        
+        # ---------------------------------------------------------
+        # 3. 幅度匹配 Loss (限制预测出的绝对方差，避免极值)
+        # ---------------------------------------------------------
+        # 因为 [θ] 的值域非常大 (10^4 ~ 10^5)，直接做 L1 会导致 Loss 爆炸
+        # 我们在这里统一乘以 1e-4 进行缩放计算
+        scale = 1e-4
+        loss_mag = F.smooth_l1_loss(pred_spectrum * scale, target_spectrum * scale)
+        
+        # ---------------------------------------------------------
+        # 4. 辅助：能量锚定 Loss
+        # ---------------------------------------------------------
+        # E 的排序交叉相对较少，提供一点微观监督可以帮助 SE(3) Backbone 加速收敛
+        loss_E = F.mse_loss(E_pred, E_target)
+        
+        # ---------------------------------------------------------
+        # 5. 辅助：微观参数正则化 (消除内部神仙打架)
+        # ---------------------------------------------------------
+        loss_reg = torch.tensor(0.0, device=E_pred.device)
+        if 'mu_pred' in output_dict and 'm_pred' in output_dict:
+            # 迫使模型寻找最平滑、最经济的原子级偶极分布
+            loss_reg = torch.mean(output_dict['mu_pred']**2) + torch.mean(output_dict['m_pred']**2)
+            
+        return {
+            'loss_shape': loss_shape,
+            'loss_mag': loss_mag,
+            'loss_E': loss_E,
+            'loss_reg': loss_reg
         }
-
-        return total_loss, loss_dict

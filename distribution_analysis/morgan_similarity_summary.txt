@@ -1,0 +1,128 @@
+Morgan Fingerprint Similarity Analysis (useChirality=True)
+Morgan radius=2, bits=2048
+========================================================================================================================
+
+--- Top-50 PCC test molecules vs. training set （共 50 个分子）---
+  Mean   = 0.7677
+  Median = 0.8000
+  Max    = 0.8571
+  Min    = 0.6271
+  >= 0.9 : 0
+  >= 0.8 : 26
+  >= 0.7 : 42
+
+Rank  Test mol_id   PCC       Max Tanimoto    Best train mol_id   Train SMILES (first 60 chars)
+------------------------------------------------------------------------------------------------------------------------
+1     -4476         0.9936    0.8095          -5485               C[C@@H](Oc1cccc2ccccc12)C(=O)OC(c3cccc4ccccc34)c5cccc6ccccc5
+2     4476          0.9936    0.8095          5485                C[C@H](Oc1cccc2ccccc12)C(=O)OC(c3cccc4ccccc34)c5cccc6ccccc56
+3     4429          0.9913    0.8095          5025                Clc1ccc(C[C@H]2NC(=O)N(Cc3c(Cl)cccc3Cl)C2=O)cc1
+4     -4429         0.9913    0.8095          -5025               Clc1ccc(C[C@@H]2NC(=O)N(Cc3c(Cl)cccc3Cl)C2=O)cc1
+5     2972          0.9865    0.7059          1994                Cc1ccc(cc1)[C@H]2Nc3ccccc3NC2=O
+6     -2972         0.9865    0.7059          -1994               Cc1ccc(cc1)[C@@H]2Nc3ccccc3NC2=O
+7     -7062         0.9856    0.8125          7762                Cc1ccc(cc1)/C=C/[P@](=O)(c2ccccc2)C(C)(C)C
+8     7062          0.9856    0.8125          7762                Cc1ccc(cc1)/C=C/[P@](=O)(c2ccccc2)C(C)(C)C
+9     7476          0.9848    0.8387          7680                C[C@H](\C=C\c1ccc(C)cc1)[S](=O)(=O)c2ccc(C)cc2
+10    -7476         0.9848    0.8387          -7680               C[C@@H](\C=C\c1ccc(C)cc1)[S](=O)(=O)c2ccc(C)cc2
+11    -4633         0.9818    0.8478          6988                COc1ccc2C(=O)N(C)[C@]3(C=CC(=C)c4ccccc34)c2c1
+12    4633          0.9818    0.8478          6988                COc1ccc2C(=O)N(C)[C@]3(C=CC(=C)c4ccccc34)c2c1
+13    -9667         0.9793    0.7551          -9640               Clc1ccc2N(C(=O)[C@@]3(CCC(=O)O3)c2c1)C(c4ccccc4)(c5ccccc5)c6
+14    9667          0.9792    0.7551          9640                Clc1ccc2N(C(=O)[C@]3(CCC(=O)O3)c2c1)C(c4ccccc4)(c5ccccc5)c6c
+15    7262          0.9771    0.8400          7087                CCCc1ccc(cc1)C=CC2=C[C@H](N[S](=O)(=O)c3ccccc23)C(C)(C)C
+16    -7262         0.9771    0.8400          -7087               CCCc1ccc(cc1)C=CC2=C[C@@H](N[S](=O)(=O)c3ccccc23)C(C)(C)C
+17    8649          0.9744    0.8222          6066                COC(=O)[C@]1(OC(=O)c2cc3ccccc3n12)c4ccccc4
+18    -8649         0.9744    0.8222          -6066               COC(=O)[C@@]1(OC(=O)c2cc3ccccc3n12)c4ccccc4
+19    -8591         0.9721    0.6271          -5621               C[C@@]1(CC#Cc2ccccc2)CN(Cc3ccccc3)C(=O)c4ccccc14
+20    8591          0.9721    0.6271          5621                C[C@]1(CC#Cc2ccccc2)CN(Cc3ccccc3)C(=O)c4ccccc14
+21    6166          0.9682    0.8000          7202                OCC[C@H](Oc1ccc(cc1)c2ccccc2)c3ccccc3
+22    -6166         0.9682    0.8000          -7202               OCC[C@@H](Oc1ccc(cc1)c2ccccc2)c3ccccc3
+23    1501          0.9679    0.7000          636                 CN(C)C(=O)[C@H](N)c1ccc(C)cc1
+24    -1501         0.9679    0.7000          -636                CN(C)C(=O)[C@@H](N)c1ccc(C)cc1
+25    7805          0.9674    0.8182          7415                COC(=O)C(C(=O)OC)[C@]1(CC=O)C(=O)N(Cc2ccccc2)c3ccc(C)cc13
+26    -7805         0.9674    0.8182          -7415               COC(=O)C(C(=O)OC)[C@@]1(CC=O)C(=O)N(Cc2ccccc2)c3ccc(C)cc13
+27    3442          0.9674    0.7500          -4351               Cc1cccc(C[C@@]2(C)CC(=NO2)c3ccccc3)c1
+28    -3442         0.9674    0.7500          4351                Cc1cccc(C[C@]2(C)CC(=NO2)c3ccccc3)c1
+29    -9771         0.9644    0.8333          -9761               COc1ccc(CN2[C@@H](CC(C)(C)C2=O)c3ccc(C)cc3)cc1OC
+30    9771          0.9644    0.8298          9761                COc1ccc(CN2[C@H](CC(C)(C)C2=O)c3ccc(C)cc3)cc1OC
+31    3280          0.9639    0.7250          4058                Cc1cccc(c1)[C@H]2N(C(=O)N(C2=O)C(C)(C)C)C(C)(C)C
+32    -3280         0.9639    0.7250          -4058               Cc1cccc(c1)[C@@H]2N(C(=O)N(C2=O)C(C)(C)C)C(C)(C)C
+33    -5953         0.9633    0.8571          -5621               C[C@@]1(CC#Cc2ccccc2)CN(Cc3ccccc3)C(=O)c4ccccc14
+34    5953          0.9633    0.8571          5621                C[C@]1(CC#Cc2ccccc2)CN(Cc3ccccc3)C(=O)c4ccccc14
+35    6178          0.9560    0.8049          4800                CC(=O)N[C@H]1Cc2cc(C)ccc2c3ccccc13
+36    -6178         0.9560    0.8049          -4800               CC(=O)N[C@@H]1Cc2cc(C)ccc2c3ccccc13
+37    7129          0.9538    0.7800          5130                COc1cccc(c1)[C@H]2Cc3ccccc3C(=O)C(=N2)c4ccccc4O
+38    -7129         0.9538    0.7800          -5130               COc1cccc(c1)[C@@H]2Cc3ccccc3C(=O)C(=N2)c4ccccc4O
+39    847           0.9531    0.7317          726                 CC(=O)N[C@H](C[S](C)(=O)=O)c1cccc(C)c1
+40    -847          0.9531    0.7317          -726                CC(=O)N[C@@H](C[S](C)(=O)=O)c1cccc(C)c1
+41    -7157         0.9479    0.8205          -6838               CC1(C)C[C@@H](N(Cc2ccccc2)C1=O)c3ccccc3
+42    7157          0.9478    0.8205          6838                CC1(C)C[C@H](N(Cc2ccccc2)C1=O)c3ccccc3
+43    6444          0.9451    0.6842          8546                CC(=O)N[C@H]1Cc2cc3ccccc3cc2C1=O
+44    -6444         0.9451    0.6842          -8546               CC(=O)N[C@@H]1Cc2cc3ccccc3cc2C1=O
+45    1154          0.9449    0.7000          2218                Clc1ccc2OC(=O)[C@H](Nc2c1)c3ccccc3
+46    -1154         0.9449    0.7000          -2218               Clc1ccc2OC(=O)[C@@H](Nc2c1)c3ccccc3
+47    -6897         0.9438    0.6552          5251                O=[S@](Cc1ccccc1)c2ccccc2
+48    6897          0.9438    0.6552          5251                O=[S@](Cc1ccccc1)c2ccccc2
+49    -5249         0.9401    0.6667          -1939               Cc1ccccc1[C@@H]2CCc3ccccc3N2
+50    5249          0.9401    0.6667          1939                Cc1ccccc1[C@H]2CCc3ccccc3N2
+
+--- Bottom-50 PCC test molecules vs. training set （共 50 个分子）---
+  Mean   = 0.7406
+  Median = 0.7593
+  Max    = 0.9643
+  Min    = 0.3962
+  >= 0.9 : 4
+  >= 0.8 : 16
+  >= 0.7 : 37
+
+Rank  Test mol_id   PCC       Max Tanimoto    Best train mol_id   Train SMILES (first 60 chars)
+------------------------------------------------------------------------------------------------------------------------
+1     7372          -0.9677   0.8776          7897                Cc1cc(C)c(c(C)c1)[P@](=O)(CC(=C)C(=O)OCc2ccccc2)c3ccc(cc3)c4
+2     -7372         -0.9677   0.8776          7897                Cc1cc(C)c(c(C)c1)[P@](=O)(CC(=C)C(=O)OCc2ccccc2)c3ccc(cc3)c4
+3     1854          -0.9390   0.5758          502                 C(N[C@H](\C=C\c1ccccc1)c2ccccc2)c3ccccc3
+4     -1854         -0.9390   0.5588          -502                C(N[C@@H](\C=C\c1ccccc1)c2ccccc2)c3ccccc3
+5     1331          -0.9185   0.9643          1586                COc1ccc(CN2CC\C(=C/C[C@](C)(C(=O)OC2=O)c3ccc(cc3)c4ccccc4)c5
+6     -1331         -0.9185   0.9643          -1586               COc1ccc(CN2CC\C(=C/C[C@@](C)(C(=O)OC2=O)c3ccc(cc3)c4ccccc4)c
+7     1258          -0.8866   0.7647          2978                CC(=O)C[C@H](c1ccccc1)c2cn(c3ccccc23)[S](=O)(=O)C(F)(F)F
+8     -1258         -0.8866   0.7647          2978                CC(=O)C[C@H](c1ccccc1)c2cn(c3ccccc23)[S](=O)(=O)C(F)(F)F
+9     10854         -0.8238   0.5349          8052                OC[C@](O)(Cn1cncn1)c2ccc(F)cc2F
+10    -10854        -0.8238   0.5349          8052                OC[C@](O)(Cn1cncn1)c2ccc(F)cc2F
+11    -7473         -0.7887   0.8846          -7251               CCCCCC/C=C/C=C/C[C@@]1(Cc2ccccc2)SC(=NC1=O)c3ccccc3
+12    7473          -0.7887   0.8846          7251                CCCCCC/C=C/C=C/C[C@]1(Cc2ccccc2)SC(=NC1=O)c3ccccc3
+13    10778         -0.7878   0.8000          10876               CC(=C)[C@H]1CN(c2cc(C)ccc2O1)[S](=O)(=O)c3ccc(C)cc3
+14    -10778        -0.7878   0.8000          -10876              CC(=C)[C@@H]1CN(c2cc(C)ccc2O1)[S](=O)(=O)c3ccc(C)cc3
+15    -2681         -0.7842   0.6406          2754                C[Si](C)(C)[Si](C[C@]1(CCCN1C(=O)Nc2cc(cc(c2)C(F)(F)F)C(F)(F
+16    2681          -0.7841   0.6406          2754                C[Si](C)(C)[Si](C[C@]1(CCCN1C(=O)Nc2cc(cc(c2)C(F)(F)F)C(F)(F
+17    -10109        -0.7833   0.7174          10031               CC(C)(C)OC(=O)[C@](O)(SCCc1ccccc1)[Si](C)(c2ccccc2)c3ccccc3
+18    -2435         -0.7833   0.7805          -1898               CCOC(=O)[C@@H](CC(=O)c1ccc(C)cc1)C[N+]([O-])=O
+19    -10866        -0.7833   0.8947          -8525               Cc1ccc(cc1)[C@@H](COCc2ccccc2)C(=O)c3ccccc3
+20    2435          -0.7833   0.7805          1898                CCOC(=O)[C@H](CC(=O)c1ccc(C)cc1)C[N+]([O-])=O
+21    10109         -0.7833   0.7234          -10031              CC(C)(C)OC(=O)[C@@](O)(SCCc1ccccc1)[Si](C)(c2ccccc2)c3ccccc3
+22    10866         -0.7832   0.8947          8525                Cc1ccc(cc1)[C@H](COCc2ccccc2)C(=O)c3ccccc3
+23    7266          -0.7811   0.8909          6438                COc1ccc(CN2C[C@](C)(CC#Cc3ccccc3)c4ccccc4C2=O)cc1
+24    -7266         -0.7811   0.8909          -6438               COc1ccc(CN2C[C@@](C)(CC#Cc3ccccc3)c4ccccc4C2=O)cc1
+25    -9388         -0.7496   0.7000          4873                Cc1ccc(cc1)[C@](C)(\C=C2/OC(=O)c3ccccc23)[S](=O)(=O)c4ccc(C)
+26    9388          -0.7495   0.7000          -4873               Cc1ccc(cc1)[C@@](C)(\C=C2/OC(=O)c3ccccc23)[S](=O)(=O)c4ccc(C
+27    -9104         -0.7485   0.7174          9935                CC(C)(C)OC(=O)N1CCN([C@H](C1)c2ccccc2)C(=O)OC(C)(C)C
+28    9104          -0.7485   0.6809          -9935               CC(C)(C)OC(=O)N1CCN([C@@H](C1)c2ccccc2)C(=O)OC(C)(C)C
+29    6217          -0.6789   0.7500          6380                Cc1ccc(\C=C\[C@H]2N[S](=O)(=O)Oc3ccccc23)cc1
+30    -6217         -0.6789   0.7500          -6380               Cc1ccc(\C=C\[C@@H]2N[S](=O)(=O)Oc3ccccc23)cc1
+31    5365          -0.6670   0.7593          9373                CN(c1ccccc1)[P@](=O)(c2ccccc2O)c3ccccc3OC(=O)c4c(C)cc(C)cc4C
+32    -5365         -0.6669   0.7593          9373                CN(c1ccccc1)[P@](=O)(c2ccccc2O)c3ccccc3OC(=O)c4c(C)cc(C)cc4C
+33    -7197         -0.6584   0.6667          5358                Cc1ccc(cc1)[C@H](CO)CCCO
+34    7197          -0.6584   0.6667          -5358               Cc1ccc(cc1)[C@@H](CO)CCCO
+35    -4456         -0.6516   0.8182          4459                Cc1ccc2C(=O)O[C@H](OC(=O)C(c3ccccc3)c4ccccc4)c2c1
+36    4456          -0.6514   0.8182          -4459               Cc1ccc2C(=O)O[C@@H](OC(=O)C(c3ccccc3)c4ccccc4)c2c1
+37    3553          -0.6476   0.4643          10297               Cc1ccc(cc1)[S](=O)(=O)N2C[C@H](C=C)N(c3ccc(C)cc3C2=O)[S](C)(
+38    -3553         -0.6476   0.4643          -10297              Cc1ccc(cc1)[S](=O)(=O)N2C[C@@H](C=C)N(c3ccc(C)cc3C2=O)[S](C)
+39    8208          -0.6379   0.7209          5534                Cc1ccc(cc1)[S](=O)(=O)N[C@H](c2cc(cc(c2)C(C)(C)C)C(C)(C)C)C(
+40    -8208         -0.6379   0.7209          -5534               Cc1ccc(cc1)[S](=O)(=O)N[C@@H](c2cc(cc(c2)C(C)(C)C)C(C)(C)C)C
+41    23            -0.6247   0.7333          62                  C[C@]1(CC2(CCCCC2)CN1C(=S)Nc3cc(cc(c3)C(F)(F)F)C(F)(F)F)c4cc
+42    -23           -0.6247   0.7377          -62                 C[C@@]1(CC2(CCCCC2)CN1C(=S)Nc3cc(cc(c3)C(F)(F)F)C(F)(F)F)c4c
+43    10433         -0.5986   0.7742          10683               CC(C)(C)[P@](=O)(Cc1ccccc1)c2ccccc2
+44    -10433        -0.5985   0.7742          10683               CC(C)(C)[P@](=O)(Cc1ccccc1)c2ccccc2
+45    -1175         -0.5886   0.9074          -677                Cc1ccc(C[C@@H]\2CC(=O)N(C2=C/c3ccc(C)cc3)C(C)(C)c4ccccn4)cc1
+46    1175          -0.5886   0.9074          677                 Cc1ccc(C[C@H]\2CC(=O)N(C2=C/c3ccc(C)cc3)C(C)(C)c4ccccn4)cc1
+47    2651          -0.5826   0.4118          4166                CCOC(=O)C1=C(C)OC(=O)C[C@H]1c2ccccc2
+48    -2651         -0.5825   0.3962          4767                CCOC(=O)C1=C(NC(=O)N[C@H]1c2ccccc2)c3ccccc3
+49    10397         -0.5780   0.7959          9944                CCOC(=O)C1=C(NC(=O)C[C@H]1C(F)(F)F)c2ccc(Cl)cc2
+50    -10397        -0.5780   0.7959          -9944               CCOC(=O)C1=C(NC(=O)C[C@@H]1C(F)(F)F)c2ccc(Cl)cc2
+

@@ -1,6 +1,7 @@
 documents/
 .vscode/
 .claude/
+.codex
 .DS_Store
 CLAUDE.md
 Codex.md
@@ -8,4 +9,4 @@ checkpoints/
 overfit_test/
 *.pyc
 *.log
-
+__pycache__/

@@ -304,5 +304,5 @@ if __name__ == "__main__":
     test_translation_invariance()
     
     print("\n" + "=" * 80)
-    print("测试完成")
+    print("测试完成。")
     print("=" * 80)
